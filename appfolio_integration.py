@@ -1,14 +1,13 @@
 import json
+import aiohttp
 import datetime
 import urllib.parse
-from datetime import datetime
-from typing import Any, Union
 
-import aiohttp
 from bs4 import BeautifulSoup
+from typing import Any, Union
+from datetime import datetime
 from fake_useragent import UserAgent
 
-from helpers.tools import cookie_dict_to_string
 from submodule_integrations.models.integration import Integration
 from submodule_integrations.utils.errors import (
     IntegrationAuthError,
@@ -23,8 +22,9 @@ class AppFolioIntegration(Integration):
         self.user_agent = user_agent
         self.url = "https://ocf.appfolio.com"
         self.headers = None
+        self.token = None
 
-    async def initialize(self, network_requester=None, tokens: dict = None):
+    async def initialize(self, network_requester=None, tokens: dict|str = None):
         self.network_requester = network_requester
         self.headers = {
             'Host': 'ocf.appfolio.com',
@@ -32,12 +32,18 @@ class AppFolioIntegration(Integration):
         }
 
         if isinstance(tokens, dict):
-            cookie_str = cookie_dict_to_string(tokens)
+            cookie_str = self._cookie_dict_to_string(tokens)
+            self.token = cookie_str
             self.headers["Cookie"] = cookie_str
 
         if isinstance(tokens, str):
             cookie_str = tokens
+            self.token = cookie_str
             self.headers["Cookie"] = cookie_str
+
+    @staticmethod
+    def _cookie_dict_to_string(cookie_dict: dict) -> str:
+        return "; ".join([f"{key}={value}" for key, value in cookie_dict.items()])
 
     async def _make_request(self, method: str, url: str, **kwargs) -> str:
         """
@@ -118,6 +124,11 @@ class AppFolioIntegration(Integration):
         status_code = response.status
         # do things with fail status codes
         if 400 <= status_code < 500:
+            if self.token is None:
+                raise IntegrationAuthError(
+                    message="No access token. [Credentials might not exist/be valid]",
+                    status_code=400,
+                )
             # potential auth caused
             reason = response.reason
             raise IntegrationAuthError(f"AppFolio: {status_code} - {reason}")
@@ -136,7 +147,15 @@ class AppFolioIntegration(Integration):
             "New by Appfolio": "10",
             "Assigned": "9",
             "Assigned by Appfolio": "11",
-            "Scheduled": "3"
+            "Scheduled": "3",
+            "Waiting": "6",
+            "Estimate Requested": "1",
+            "Estimated": "2",
+            "Work Done": "8",
+            "Ready to Bill": "12",
+            "Completed": "4",
+            "Completed No Need To Bill": "7",
+            "Canceled": "5",
         }
         return codes.get(status)
 
@@ -241,7 +260,7 @@ class AppFolioIntegration(Integration):
     async def fetch_work_orders(self, status: str, start_date: str):
         params = {
             "page[size]": "100",
-            "page[number]": "1",
+            # "page[number]": "1",
             "filter[created_at__gteq]": self._format_date(start_date),
             "sort": "-created_at",
 
@@ -275,15 +294,26 @@ class AppFolioIntegration(Integration):
         headers["Accept"] = "application/vnd.api+json"
 
         url = f"{self.url}/api/work_orders"
-        response = await self._make_request("GET", url, headers=headers, params=params)
-        try:
-            response = json.loads(response)
-        except json.decoder.JSONDecodeError:
-            print("not json response")
+        raw_wo_list = []
+        page_index = 1
+        while True:
+            params.update({ "page[number]": f"{page_index}"})
+            response = await self._make_request("GET", url, headers=headers, params=params)
+            try:
+                response = json.loads(response)
+            except json.decoder.JSONDecodeError:
+                print(f"not json response: {response}")
 
-        denorm_response = self.denormalize_response(response)
+            denorm_response = self.denormalize_response(response)
+            if len(denorm_response) > 0:
+                raw_wo_list.extend(denorm_response)
+            else:
+                break
+
+            page_index += 1
+
         work_orders = []
-        for order in denorm_response:
+        for order in raw_wo_list:
             parsed_order = await self._parse_work_order_page(url=order.get('page'))
             order.update(parsed_order)
             work_orders.append(order)
@@ -312,7 +342,7 @@ class AppFolioIntegration(Integration):
             property_card_data = property_card_element.select_one("div.js-contact-card-details")
             card_data_spans = property_card_data.select("span")
             property_data = "\n".join(span.text.strip() for span in card_data_spans)
-            work_order_data['property'] = property_data.strip()
+            work_order_data['property'] = property_data.strip().replace("-5\n", "")
 
         owner_card_element = soup.select_one("div.js-owner-contact-card")
         if owner_card_element:
