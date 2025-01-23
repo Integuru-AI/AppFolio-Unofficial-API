@@ -1,4 +1,7 @@
+import html
 import json
+import re
+
 import aiohttp
 import datetime
 import urllib.parse
@@ -329,6 +332,7 @@ class AppFolioIntegration(Integration):
         soup = self._create_soup(response)
 
         work_order_data = {}
+        service_id = self._extract_service_request_id(url)
 
         # get job description
         description_element = soup.select_one("div.js-work-order-description")
@@ -388,7 +392,7 @@ class AppFolioIntegration(Integration):
             }
             work_order_data['vendor'] = vendor
 
-        # get priority info
+        # get priority information
         priority_element = soup.find("span", text="Priority:")
         if priority_element:
             priority_element_value = soup.select_one("span.js-service-request-header-priority")
@@ -396,7 +400,130 @@ class AppFolioIntegration(Integration):
                 priority = priority_element_value.text.strip()
                 work_order_data['priority'] = priority
 
+        # get actions information
+        actions_element = soup.select_one("div.js-activity-log")
+        if actions_element:
+            actions = []
+            activity_rows = actions_element.select("div.js-activity-log-row")
+            for row in activity_rows:
+                activity_text = self._extract_text_from_div(row)
+                actions.append(activity_text)
+
+            work_order_data['actions'] = actions
+
+        # get vendor instructions
+        vendor_instructions_element = soup.select_one("div.js-work-order-vendor-instructions")
+        if vendor_instructions_element:
+            instructions = self._extract_text_from_div(vendor_instructions_element)
+            work_order_data['vendor_instructions'] = instructions
+
+        # get work order notes
+        notes_element = soup.select_one("div#notes")
+        if notes_element:
+            notes_card_element = notes_element.select_one("div.card-body")
+            if notes_card_element:
+                notes = await self._fetch_notes(service_id=service_id)
+                work_order_data['notes'] = notes
+
+        # get attachments
+        attachments_element = soup.select_one("div.js-work-order-body__attachments")
+        if attachments_element:
+            attachments = await self._fetch_attachments(service_id=service_id)
+            work_order_data['attachments'] = attachments
+
         return work_order_data
+
+    async def _fetch_notes(self, service_id: str):
+        params = {
+            'add_notes_for_id': f'{service_id}',
+            'add_notes_for_type': 'Maintenance::ServiceRequestDecorator',
+            'show_all': 'true',
+            'show_notes_for_id': f'{service_id}',
+            'show_notes_for_type': 'Maintenance::ServiceRequestDecorator',
+        }
+        url = f"{self.url}/notes"
+        headers = self.headers.copy()
+        headers['Accept'] = '*/*;q=0.5, text/javascript, application/javascript, application/ecmascript, application/x-ecmascript'
+
+        response = await self._make_request("GET", url, headers=headers, params=params)
+        # regex matching was not consistent
+        start_idx = response.find('.html(')
+        if start_idx == -1:
+            return None
+
+        # Find the first quote after .html(
+        content_start = response.find('"', start_idx)
+        if content_start == -1:
+            return None
+
+        # Find the last quote before the closing parenthesis
+        content_end = response.rfind('"')
+        if content_end == -1 or content_end <= content_start:
+            return None
+
+        # Extract the content between quotes
+        content = response[content_start + 1:content_end]
+        # Replace escaped characters
+        content = content.replace('\\"', '"')  # Unescape quotes
+        content = content.replace('\\n', '\n')  # Handle newlines
+        content = content.replace('\\/', '/')  # Handle forward slashes
+        content = content.strip()
+
+        soup = self._create_soup(content)
+        notes_block = soup.select_one("section.js-notes-block")
+        notes_list = notes_block.select("div.js-block-show")
+
+        notes = []
+        for item in notes_list:
+            note = self._extract_text_from_div(item)
+            if note == "":
+                continue
+
+            note = note.replace("\nEdit\nDelete", "")
+            note = note.replace("\nshow full note\ncollapse note", "")
+            notes.append(note)
+
+        return notes
+
+    async def _fetch_attachments(self, service_id: str):
+        url = f"{self.url}/api/work_orders?filter[service_request][id]={service_id}&fields[service_requests]=id&fields[work_orders]=remarks,display_number&fields[attachments]=name,preview_url,created_at,size&include=visible_attachments"
+        headers = self.headers.copy()
+        headers['Accept'] = "application/vnd.api+json"
+        headers['Accept-Version'] = "v2"
+
+        response = await self._make_request("GET", url, headers=headers)
+        try:
+            response = json.loads(response)
+        except json.decoder.JSONDecodeError:
+            print("failed to decode response for fetching attachments")
+            return None
+
+        included: list = response['included']
+        attachments = []
+        for included_item in included:
+            if included_item.get('type') == "attachments":
+                attached = included_item.get('attributes')
+                attachments.append(attached)
+
+        return attachments
+
+    @staticmethod
+    def _extract_service_request_id(url):
+        """
+        Extracts the first ID (service request ID) from an AppFolio maintenance URL.
+
+        Args:
+            url (str): The AppFolio URL containing service_requests ID
+
+        Returns:
+            str: The service request ID if found, None otherwise
+        """
+        # Use regex to find the service_requests ID
+        match = re.search(r'/service_requests/(\d+)/', url)
+
+        if match:
+            return match.group(1)
+        return None
 
     @staticmethod
     def _create_soup(text: str):
