@@ -431,6 +431,13 @@ class AppFolioIntegration(Integration):
             attachments = await self._fetch_attachments(service_id=service_id)
             work_order_data['attachments'] = attachments
 
+        # get task assignee
+        assignee_element = soup.select_one("div.js-assigned-to")
+        if assignee_element:
+            assigned_to_element = assignee_element.select_one("span.js-assignee-name")
+            assigned_to_name = assigned_to_element.text.strip()
+            work_order_data['assigned_to'] = assigned_to_name
+
         return work_order_data
 
     async def _fetch_notes(self, service_id: str):
