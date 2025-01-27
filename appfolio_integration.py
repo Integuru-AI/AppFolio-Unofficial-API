@@ -318,6 +318,13 @@ class AppFolioIntegration(Integration):
         work_orders = []
         for order in raw_wo_list:
             parsed_order = await self._parse_work_order_page(url=order.get('page'))
+            if order.get('vendor_company'):
+                order.pop('vendor_company')
+            if order.get('remarks'):
+                order.pop('remarks')
+            if order.get('work_order_assigned_users'):
+                order.pop('work_order_assigned_users')
+
             order.update(parsed_order)
             work_orders.append(order)
 
@@ -434,9 +441,12 @@ class AppFolioIntegration(Integration):
         # get task assignee
         assignee_element = soup.select_one("div.js-assigned-to")
         if assignee_element:
-            assigned_to_element = assignee_element.select_one("span.js-assignee-name")
-            assigned_to_name = assigned_to_element.text.strip()
-            work_order_data['assigned_to'] = assigned_to_name
+            assignees = []
+            assigned_to_elements = assignee_element.select("span.js-assignee-name")
+            for each in assigned_to_elements:
+                assigned_to_name = each.text.strip()
+                assignees.append(assigned_to_name)
+            work_order_data['assigned_to'] = assignees
 
         return work_order_data
 
