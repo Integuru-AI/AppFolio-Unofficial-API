@@ -551,26 +551,113 @@ class AppFolioIntegration(Integration):
 
         soup = self._create_soup(results_html)
 
-        headers['Accept'] = '*/*;q=0.5, text/javascript, application/javascript, application/ecmascript, application/x-ecmascript'
+        headers['Accept'] = 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
 
         vacancy_cards = soup.select("div.js-listable-card")
         vacancies = []
         for vacancy_item in vacancy_cards:
-            parsed = self._parse_vacancy_card(card=vacancy_item)
-            property_url = parsed.get('link')
+            try:
+                parsed = self._parse_vacancy_card(card=vacancy_item)
+                property_url = parsed.get('link')
 
-            property_page = await self._make_request(method="GET", url=property_url, headers=headers)
-            page_soup = self._create_soup(property_page)
-            page_data = self._parse_vacancy_page(soup=page_soup)
-            parsed.update(page_data)
+                property_page = await self._make_request(method="GET", url=property_url, headers=headers,
+                                                         max_line_size=8190*15, max_field_size=8190*15)
+                page_soup = self._create_soup(property_page)
+                page_data = self._parse_vacancy_page(soup=page_soup)
 
-            vacancies.append(parsed)
+                parsed.update(page_data)
+                vacancies.append(parsed)
+            except Exception as e:
+                print(f"failed to parse vacancy: {e}")
 
         return vacancies
 
     @staticmethod
-    def _parse_vacancy_page(soup: BeautifulSoup):
-        pass
+    def _parse_vacancy_page(soup: BeautifulSoup) -> dict[str, Any]:
+        data = {}
+        unit_data = {}
+        property_data = {}
+
+        unit_desc_elem = soup.select_one("div.unit-name-and-address")
+        if unit_desc_elem is not None:
+            unit_type_elem = unit_desc_elem.select_one("div.js-unit_template_key_value_datapair")
+            if unit_type_elem is not None:
+                unit_type = unit_type_elem.select_one("div.datapair__value")
+                unit_data["type"] = unit_type.text.strip()
+
+        property_desc_elem = soup.select_one("div.property-name-and-address")
+        if property_desc_elem is not None:
+            property_type_elem = property_desc_elem.select_one("div#property_type_value")
+            if property_type_elem is not None:
+                property_data["type"] = property_type_elem.text.strip()
+
+            county_elem = property_desc_elem.select_one("div.js-marketing-property-county")
+            if county_elem is not None:
+                property_data["county"] = county_elem.text.strip()
+
+        unit_info_elem = soup.select_one("div#unit_information_show")
+        if unit_info_elem is not None:
+            info_pairs = unit_info_elem.select("div.datapair")
+            unit_info = AppFolioIntegration._parse_data_pairs(info_pairs)
+
+            unit_data["general"] = unit_info
+
+        property_info_elem = soup.select_one("div#property_information_show")
+        if property_info_elem is not None:
+            info_pairs = property_info_elem.select("div.datapair")
+            property_info = AppFolioIntegration._parse_data_pairs(info_pairs)
+
+            property_data["general"] = property_info
+
+        unit_rental_info_elem = soup.select_one("div#unit_rental_information_show")
+        if unit_rental_info_elem is not None:
+            info_pairs = unit_rental_info_elem.select("div.datapair")
+            unit_rental_info = AppFolioIntegration._parse_data_pairs(info_pairs)
+            unit_data["rental_info"] = unit_rental_info
+
+        property_rental_info_elem = soup.select_one("div#property_rental_information_show")
+        if property_rental_info_elem is not None:
+            info_pairs = property_rental_info_elem.select("div.datapair")
+            property_rental_info = AppFolioIntegration._parse_data_pairs(info_pairs)
+            property_data["rental_info"] = property_rental_info
+
+        amenities_elem = soup.select_one("div#amenities_information_show")
+        if amenities_elem is not None:
+            info_pairs = amenities_elem.select("div.datapair")
+            amenities = AppFolioIntegration._parse_data_pairs(info_pairs)
+            data["amenities"] = amenities
+
+        unit_marketing_elem = soup.select_one("div#unit_marketing_information_show")
+        if unit_marketing_elem is not None:
+            info_pairs = unit_marketing_elem.select("div.datapair")
+            unit_info = AppFolioIntegration._parse_data_pairs(info_pairs)
+            unit_data["marketing_info"] = unit_info
+
+        property_marketing_elem = soup.select_one("div#property_marketing_information_show")
+        if property_marketing_elem is not None:
+            info_pairs = property_marketing_elem.select("div.datapair")
+            property_info = AppFolioIntegration._parse_data_pairs(info_pairs)
+            property_data["marketing_info"] = property_info
+
+        data["unit"] = unit_data
+        data["property"] = property_data
+
+        return data
+
+    @staticmethod
+    def _parse_data_pairs(info_pairs: list[Tag]):
+        data = {}
+        for info_pair in info_pairs:
+            info_key = info_pair.select_one("div.datapair__key").text.strip()
+            info_value_elem = info_pair.select_one("div.datapair__value")
+            info_value = AppFolioIntegration._extract_text_from_div(info_value_elem)
+
+            if "View Nearby Advertised Units" in info_value:
+                info_value = info_value.replace("View Nearby Advertised Units", "")
+
+            data[info_key] = info_value
+
+        return data
 
     @staticmethod
     def _parse_vacancy_card(card: Tag):
