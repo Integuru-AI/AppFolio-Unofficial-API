@@ -1,12 +1,11 @@
-import html
-import json
+import codecs
 import re
-
+import json
 import aiohttp
 import datetime
 import urllib.parse
 
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Tag
 from typing import Any, Union
 from datetime import datetime
 from fake_useragent import UserAgent
@@ -523,6 +522,117 @@ class AppFolioIntegration(Integration):
                 attachments.append(attached)
 
         return attachments
+
+    async def fetch_vacancies(self):
+        url = f"{self.url}/vacancies"
+        params = {
+            'filters[properties_ids]': '',
+            'filters[bedrooms]': '',
+            'filters[min_rent]': '',
+            'filters[max_rent]': '',
+            'filters[available_from]': '',
+            'filters[available_to]': '',
+            'filters[cats]': '',
+            'filters[dogs]': '',
+            'filters[sort_by]': 'websitePostingVisible',
+        }
+        headers = self.headers.copy()
+        headers['Accept'] = "application/json; q=0.01"
+        response = await self._make_request("GET", url=url, headers=headers, params=params)
+        try:
+            response = json.loads(response)
+            results_html = response.get('results_html')
+        except json.decoder.JSONDecodeError:
+            print(f"not json response: {response[:300]}")
+            results_html = response
+
+        if results_html is None:
+            return None
+
+        soup = self._create_soup(results_html)
+
+        headers['Accept'] = '*/*;q=0.5, text/javascript, application/javascript, application/ecmascript, application/x-ecmascript'
+
+        vacancy_cards = soup.select("div.js-listable-card")
+        vacancies = []
+        for vacancy_item in vacancy_cards:
+            parsed = self._parse_vacancy_card(card=vacancy_item)
+            property_url = parsed.get('link')
+
+            property_page = await self._make_request(method="GET", url=property_url, headers=headers)
+            page_soup = self._create_soup(property_page)
+            page_data = self._parse_vacancy_page(soup=page_soup)
+            parsed.update(page_data)
+
+            vacancies.append(parsed)
+
+        return vacancies
+
+    @staticmethod
+    def _parse_vacancy_page(soup: BeautifulSoup):
+        pass
+
+    @staticmethod
+    def _parse_vacancy_card(card: Tag):
+        vacancy = {}
+        name_elem = card.select_one("span.js-card-title")
+        if name_elem is not None:
+            vacancy['name'] = name_elem.text.strip()
+
+            link_elem = name_elem.select_one("a")
+            link = link_elem.get("href")
+            vacancy['link'] = "https://ocf.appfolio.com" + link
+
+        address_elem = card.select_one("span.js-card-address")
+        if address_elem is not None:
+            vacancy['address'] = address_elem.text.strip()
+
+        rent_table_elem = card.select_one("table.unit-property-card__table")
+        if rent_table_elem is not None:
+            rent_data = []
+            table_bits = rent_table_elem.select("td")
+            for item in table_bits:
+                item_data = {}
+                item_title_elem = item.select_one("span.unit-property-card__tiny-header")
+                item_title = item_title_elem.text.strip()
+                item_title = codecs.decode(item_title, "unicode-escape")
+                item_value_elem = item.select_one('[class^="js-card"]')
+                item_value = item_value_elem.text.strip()
+                item_value = codecs.decode(item_value, "unicode-escape")
+
+                item_data[item_title] = item_value
+                rent_data.append(item_data)
+
+            vacancy['rent_data'] = rent_data
+
+        actions_elem = card.select_one("div.action-table")
+        rent_status_card = actions_elem.select_one("p.js-vacancy-type")
+        if rent_status_card is not None:
+            rent_status = rent_status_card.text.strip()
+            vacancy['rent_status'] = rent_status
+
+        actions_table_elem = actions_elem.select_one("table")
+        if actions_table_elem is not None:
+            website_status_row = actions_table_elem.select_one("tr.js-website-tasks")
+            if website_status_row is not None:
+                value_elem = website_status_row.select_one("td.js-task-status")
+                vacancy['website_status'] = value_elem.text.strip()
+
+            internet_status_row = actions_table_elem.select_one("tr.js-internet-tasks")
+            if internet_status_row is not None:
+                value_elem = internet_status_row.select_one("td.js-task-status")
+                vacancy['internet_status'] = value_elem.text.strip()
+
+            premium_status_row = actions_table_elem.select_one("tr.js-premium-tasks")
+            if premium_status_row is not None:
+                value_elem = premium_status_row.select_one("td.js-task-status")
+                vacancy['premium_status'] = value_elem.text.strip()
+
+            refresh_status_row = actions_table_elem.select_one("td.action-table__refresh-container")
+            if refresh_status_row is not None:
+                vacancy['last_updated'] = refresh_status_row.text.strip()
+
+        return vacancy
 
     @staticmethod
     def _extract_service_request_id(url):
