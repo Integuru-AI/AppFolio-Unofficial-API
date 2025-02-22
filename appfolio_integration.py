@@ -1,3 +1,4 @@
+import asyncio
 import codecs
 import re
 import json
@@ -551,32 +552,71 @@ class AppFolioIntegration(Integration):
 
         soup = self._create_soup(results_html)
 
-        headers['Accept'] = 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
-
         vacancy_cards = soup.select("div.js-listable-card")
         vacancies = []
+        vacancy_tasks = []
         for vacancy_item in vacancy_cards:
-            try:
-                parsed = self._parse_vacancy_card(card=vacancy_item)
-                property_url = parsed.get('link')
+            task = asyncio.create_task(self._parse_vacancy_task(vacancy_item))
+            vacancy_tasks.append(task)
 
-                property_page = await self._make_request(method="GET", url=property_url, headers=headers,
-                                                         max_line_size=8190*15, max_field_size=8190*15)
-                page_soup = self._create_soup(property_page)
-                page_data = self._parse_vacancy_page(soup=page_soup)
-
-                parsed.update(page_data)
-                vacancies.append(parsed)
-            except Exception as e:
-                print(f"failed to parse vacancy: {e}")
+        for future in asyncio.as_completed(vacancy_tasks):
+            vacancy = await future
+            if future is not None:
+                vacancies.append(vacancy)
 
         return vacancies
+
+    async def _parse_vacancy_task(self, vacancy_item: Tag):
+        try:
+            headers = self.headers.copy()
+            # headers['Accept'] = 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+            headers['Accept'] = '*/*'
+
+            parsed = self._parse_vacancy_card(card=vacancy_item)
+            property_url = parsed.get('link')
+            if "campaigns" in property_url:
+                # the response for this is js and has html elements for the modal; the actual url is in here
+                campaign_resp = await self._make_request("GET", url=property_url, headers=headers,
+                                                         max_line_size=8190*15, max_field_size=8190*15)
+                d_start = campaign_resp.find("campaign_unit_type_link")
+                c_data = campaign_resp[d_start:d_start+150]
+                pattern = r'href=[\'"]([^\'"]*)[\'"]'
+                match = re.search(pattern, c_data)
+
+                if match:
+                    property_url = match.group(1)
+                else:
+                    escaped_pattern = r'href=\\[\'"]([^\\\'\\"]*)\\[\'"]'
+                    match = re.search(escaped_pattern, c_data)
+                    if match:
+                        property_url = match.group(1)
+                    else:
+                        property_url = None
+
+                if property_url:
+                    property_url = "https://ocf.appfolio.com" + property_url
+                    parsed["link"] = property_url
+
+            if property_url is None:
+                return parsed
+
+            property_page = await self._make_request(method="GET", url=property_url, headers=headers,
+                                                     max_line_size=8190*15, max_field_size=8190*15)
+            page_soup = self._create_soup(property_page)
+            page_data = self._parse_vacancy_page(soup=page_soup)
+
+            parsed.update(page_data)
+            return parsed
+        except Exception as e:
+            print(f"failed to parse vacancy: {e.with_traceback(None)}")
+            return None
 
     @staticmethod
     def _parse_vacancy_page(soup: BeautifulSoup) -> dict[str, Any]:
         data = {}
         unit_data = {}
         property_data = {}
+        campaign_unit_data = {}
 
         unit_desc_elem = soup.select_one("div.unit-name-and-address")
         if unit_desc_elem is not None:
@@ -639,8 +679,38 @@ class AppFolioIntegration(Integration):
             property_info = AppFolioIntegration._parse_data_pairs(info_pairs)
             property_data["marketing_info"] = property_info
 
+        # for campaign pages
+        campaign_rental_elem = soup.select_one("div#unit_template_basic_information_show")
+        if campaign_rental_elem is not None:
+            info_pairs = campaign_rental_elem.select("div.datapair")
+            campaign_rental_info = AppFolioIntegration._parse_data_pairs(info_pairs)
+            campaign_unit_data["rental_info"] = campaign_rental_info
+
+        campaign_marketing_elem = soup.select_one("div#unit_template_basic_information_show")
+        if campaign_marketing_elem is not None:
+            info_pairs = campaign_marketing_elem.select("div.datapair")
+            campaign_marketing_info = AppFolioIntegration._parse_data_pairs(info_pairs)
+            campaign_unit_data["marketing_info"] = campaign_marketing_info
+
+        # First find the h2 with "Amenities" text
+        amenities_header = soup.find('h2', text=lambda text: text and text.strip() == 'Amenities')
+
+        # Navigate to the card-header div
+        if amenities_header:
+            if data.get('amenities') is None:
+                card_header = amenities_header.find_parent('div', class_='card-header')
+
+                # Then find the parent section element
+                if card_header:
+                    section_parent = card_header.find_parent('section')
+                    if section_parent is not None:
+                        info_pairs = section_parent.select("div.datapair")
+                        amenities = AppFolioIntegration._parse_data_pairs(info_pairs)
+                        data["amenities"] = amenities
+
         data["unit"] = unit_data
         data["property"] = property_data
+        data["campaign"] = campaign_unit_data
 
         return data
 
@@ -672,7 +742,9 @@ class AppFolioIntegration(Integration):
 
         address_elem = card.select_one("span.js-card-address")
         if address_elem is not None:
-            vacancy['address'] = address_elem.text.strip()
+            address = address_elem.text.strip()
+            address = address.split("Edit")[0]
+            vacancy['address'] = address
 
         rent_table_elem = card.select_one("table.unit-property-card__table")
         if rent_table_elem is not None:
