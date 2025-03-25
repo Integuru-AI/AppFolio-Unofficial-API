@@ -27,7 +27,7 @@ class AppFolioIntegration(Integration):
         self.headers = None
         self.token = None
 
-    async def initialize(self, network_requester=None, tokens: dict|str = None):
+    async def initialize(self, network_requester=None, tokens: dict | str = None):
         self.network_requester = network_requester
         self.headers = {
             'Host': 'ocf.appfolio.com',
@@ -300,7 +300,7 @@ class AppFolioIntegration(Integration):
         raw_wo_list = []
         page_index = 1
         while True:
-            params.update({ "page[number]": f"{page_index}"})
+            params.update({"page[number]": f"{page_index}"})
             response = await self._make_request("GET", url, headers=headers, params=params)
             try:
                 response = json.loads(response)
@@ -332,10 +332,12 @@ class AppFolioIntegration(Integration):
 
     async def _parse_work_order_page(self, url: str):
         headers = self.headers.copy()
-        headers["Accept"] = "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/png,image/svg+xml,*/*;q=0.8"
+        headers[
+            "Accept"] = "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/png,image/svg+xml,*/*;q=0.8"
 
         # include extra parameters to support massive header sizes
-        response = await self._make_request("GET", url, headers=headers, max_line_size=8190*15, max_field_size=8190*15)
+        response = await self._make_request("GET", url, headers=headers, max_line_size=8190 * 15,
+                                            max_field_size=8190 * 15)
         soup = self._create_soup(response)
 
         work_order_data = {}
@@ -460,7 +462,8 @@ class AppFolioIntegration(Integration):
         }
         url = f"{self.url}/notes"
         headers = self.headers.copy()
-        headers['Accept'] = '*/*;q=0.5, text/javascript, application/javascript, application/ecmascript, application/x-ecmascript'
+        headers[
+            'Accept'] = '*/*;q=0.5, text/javascript, application/javascript, application/ecmascript, application/x-ecmascript'
 
         response = await self._make_request("GET", url, headers=headers, params=params)
         # regex matching was not consistent
@@ -577,9 +580,9 @@ class AppFolioIntegration(Integration):
             if "campaigns" in property_url:
                 # the response for this is js and has html elements for the modal; the actual url is in here
                 campaign_resp = await self._make_request("GET", url=property_url, headers=headers,
-                                                         max_line_size=8190*15, max_field_size=8190*15)
+                                                         max_line_size=8190 * 15, max_field_size=8190 * 15)
                 d_start = campaign_resp.find("campaign_unit_type_link")
-                c_data = campaign_resp[d_start:d_start+150]
+                c_data = campaign_resp[d_start:d_start + 150]
                 pattern = r'href=[\'"]([^\'"]*)[\'"]'
                 match = re.search(pattern, c_data)
 
@@ -601,7 +604,7 @@ class AppFolioIntegration(Integration):
                 return parsed
 
             property_page = await self._make_request(method="GET", url=property_url, headers=headers,
-                                                     max_line_size=8190*15, max_field_size=8190*15)
+                                                     max_line_size=8190 * 15, max_field_size=8190 * 15)
             page_soup = self._create_soup(property_page)
             page_data = self._parse_vacancy_page(soup=page_soup)
 
@@ -792,6 +795,273 @@ class AppFolioIntegration(Integration):
                 vacancy['last_updated'] = refresh_status_row.text.strip()
 
         return vacancy
+
+    async def fetch_tenancies(self):
+        url = f"{self.url}/lease_documents?filter_type="
+        headers = self.headers.copy()
+        headers["Accept"] = "application/json, text/javascript, */*; q=0.01"
+
+        response = await self._make_request("GET", url=url, headers=headers)
+        try:
+            response = json.loads(response)
+            results_html = response.get('results_html')
+        except json.decoder.JSONDecodeError:
+            print(f"not json response: {response[300:1000]}")
+            results_html = response
+
+        if results_html is None:
+            return None
+
+        tenancies = self._parse_lease_table(results_html)
+        return tenancies
+
+    @staticmethod
+    def _parse_lease_table(html_content):
+        """
+        Parse the lease documents table HTML into a list of dictionaries.
+
+        Args:
+            html_content (str): The HTML content of the table
+
+        Returns:
+            list: A list of dictionaries, each representing a row in the table
+        """
+        # Parse the HTML
+        soup = AppFolioIntegration._create_soup(html_content)
+
+        # Find the table
+        table = soup.find('table', id='lease_documents_list_table')
+
+        # Get table headers
+        headers = []
+        for th in table.find_all('th'):
+            headers.append(th.text.strip())
+
+        # Process each row
+        result = []
+        for row in table.find('tbody').find_all('tr'):
+            row_data = {}
+
+            # Get the document ID from the data-href attribute
+            data_href = row.get('data-href', '')
+            if data_href:
+                document_id = data_href.split('/')[-1]
+                row_data['document_id'] = document_id
+
+            # Process each cell in the row
+            cells = row.find_all('td')
+
+            # Get tenant names (split by <br> tags)
+            tenants_cell = cells[0]
+            tenants = [tenant.strip() for tenant in tenants_cell.stripped_strings]
+            row_data[headers[0]] = tenants
+
+            # Unit name
+            row_data[headers[1]] = cells[1].text.strip()
+
+            # Lease generation date
+            row_data[headers[2]] = cells[2].text.strip()
+
+            # Status
+            row_data[headers[3]] = cells[3].text.strip()
+
+            # Action info
+            action_cell = cells[4]
+            action_link = action_cell.find('a')
+            if action_link:
+                action_text = action_link.text.strip()
+                action_href = "https://ocf.appfolio.com" + action_link.get('href', '')
+                row_data['action'] = {
+                    'text': action_text,
+                    'link': action_href
+                }
+
+            result.append(row_data)
+
+        return result
+
+    async def fetch_properties(self):
+        url = f"{self.url}/properties"
+        params = {
+            'hoa_index_page': 'false',
+            'include_hidden_properties': 'true',
+            # 'page': '1',
+            'sort[by]': 'name',
+            'sort[order]': 'asc',
+        }
+        page = 1
+        properties = []
+        last_list = []
+        while True:
+            params['page'] = page
+            print(page)
+            response = await self._make_request("GET", url=url, params=params, headers=self.headers)
+            current = self._parse_properties_table(response)
+            if last_list == current or current is None:
+                break
+
+            last_list = current
+            properties.extend(current)
+            page += 1
+
+        return properties
+
+    @staticmethod
+    def _parse_properties_table(html_content):
+        """
+        Parse the properties table from HTML content and return as a JSON list.
+        Supports both direct HTML tables and JavaScript data-initial-state JSON format.
+
+        Args:
+            html_content (str): HTML content containing the properties table
+
+        Returns:
+            str: JSON string representing the properties data or error message
+        """
+        if not html_content:
+            print("Empty HTML content provided")
+            return None
+
+        # Create BeautifulSoup object
+        soup = BeautifulSoup(html_content, 'html.parser')
+        properties = []
+
+        # Check if we have the newer JSON format in data-initial-state
+        properties_table_div = soup.find('div', id='properties_table')
+        if properties_table_div and properties_table_div.get('data-initial-state'):
+            try:
+                # Parse the JSON data from data-initial-state attribute
+                initial_state = json.loads(properties_table_div['data-initial-state'])
+
+                # Process each row in body_row_data
+                for row in initial_state.get('body_row_data', []):
+                    row_data = row.get('data', [])
+                    if len(row_data) < 5:
+                        continue
+
+                    # Extract HTML content for address cell (first column)
+                    address_html = row_data[0].get('value', '')
+                    address_soup = BeautifulSoup(address_html, 'html.parser')
+                    address_link = address_soup.find('a')
+
+                    if not address_link:
+                        continue
+
+                    # Extract address parts
+                    address_parts = [part.strip() for part in address_link.get_text(separator='\n').strip().split('\n')]
+                    address_parts = [part for part in address_parts if part]  # Remove empty strings
+
+                    # Parse property info
+                    property_obj = AppFolioIntegration._parse_address_parts(address_parts)
+
+                    # Extract property URL
+                    if address_link.get('href'):
+                        property_obj['url'] = address_link['href']
+
+                    # Extract property type, units, vacancy
+                    property_obj['type'] = BeautifulSoup(row_data[1].get('value', ''), 'html.parser').text.strip()
+                    property_obj['units'] = BeautifulSoup(row_data[2].get('value', ''), 'html.parser').text.strip()
+                    property_obj['vacant'] = BeautifulSoup(row_data[3].get('value', ''), 'html.parser').text.strip() == 'Yes'
+
+                    # Extract owner information
+                    owner_html = row_data[4].get('value', '')
+                    owner_soup = BeautifulSoup(owner_html, 'html.parser')
+                    owner_span = owner_soup.find('span', class_='u-align-middle')
+                    property_obj['owner'] = owner_span.text.strip() if owner_span else None
+
+                    properties.append(property_obj)
+
+                if properties:
+                    return properties
+            except (json.JSONDecodeError, KeyError) as e:
+                # Fall back to regular HTML parsing if JSON parsing fails
+                pass
+
+        # If no JSON data is found or parsing failed, try traditional HTML parsing
+        table = soup.find('table', class_='table')
+
+        # Check if table exists
+        if not table:
+            if properties:  # If we have properties from JSON parsing but encountered an error
+                return json.dumps(properties, indent=2)
+            return json.dumps({"error": "Properties table not found in the HTML content"})
+
+        # Process rows and extract data
+        tbody = table.find('tbody')
+        if not tbody:
+            if properties:  # If we have properties from JSON parsing but encountered an error
+                return json.dumps(properties, indent=2)
+            return json.dumps({"error": "Table body not found in the properties table"})
+
+        for row in tbody.find_all('tr'):
+            cells = row.find_all('td')
+
+            # Extract address information (safely)
+            address_cell = cells[0].find('a') if len(cells) > 0 else None
+            if not address_cell:
+                continue  # Skip this row if no address cell found
+
+            address_parts = [part.strip() for part in address_cell.get_text(separator='\n').strip().split('\n')]
+            address_parts = [part for part in address_parts if part]  # Remove empty strings
+
+            # Parse property info
+            property_obj = AppFolioIntegration._parse_address_parts(address_parts)
+
+            # Extract property type, units, vacancy
+            property_obj['type'] = cells[1].text.strip() if len(cells) > 1 else None
+            property_obj['units'] = cells[2].text.strip() if len(cells) > 2 else None
+            property_obj['vacant'] = cells[3].text.strip() == 'Yes' if len(cells) > 3 else False
+
+            # Extract owner information (safely)
+            owner_cell = cells[4].find('span', class_='u-align-middle') if len(cells) > 4 else None
+            property_obj['owner'] = owner_cell.text.strip() if owner_cell else None
+
+            # Add property URL (safely)
+            try:
+                property_link = cells[0].find('a')['href'] if cells[0].find('a') else None
+                if property_link:
+                    property_obj['url'] = f"https://ocf.appfolio.com{property_link}"
+            except (KeyError, TypeError, IndexError):
+                property_obj['url'] = None
+
+            properties.append(property_obj)
+
+        # Return the extracted data
+        return properties
+
+    @staticmethod
+    def _parse_address_parts(address_parts):
+        """
+        Parse address parts into property name, street address, and city/state/zip
+
+        Args:
+            address_parts (list): List of address parts extracted from HTML
+
+        Returns:
+            dict: Dictionary with property information
+        """
+        property_name = None
+        street_address = None
+        city_state_zip = None
+
+        if len(address_parts) == 3:
+            if not address_parts[0].endswith(('Avenue', 'Street', 'Ave', 'St')):
+                property_name = address_parts[0]
+                street_address = address_parts[1]
+            else:
+                street_address = address_parts[0]
+            city_state_zip = address_parts[-1]
+        elif len(address_parts) == 2:
+            street_address = address_parts[0]
+            city_state_zip = address_parts[1]
+        elif len(address_parts) == 1:
+            street_address = address_parts[0]
+
+        return {
+            'name': property_name,
+            'street_address': street_address,
+            'city_state_zip': city_state_zip
+        }
 
     @staticmethod
     def _extract_service_request_id(url):
