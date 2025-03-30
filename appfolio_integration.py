@@ -637,6 +637,7 @@ class AppFolioIntegration(Integration):
         print(data)
         # Extract headers from the header HTML
         thead_html = data["thead_row"]
+
         soup = BeautifulSoup(thead_html, "html.parser")
         headers = [th.get_text(strip=True) for th in soup.find_all("th")]
 
@@ -649,6 +650,32 @@ class AppFolioIntegration(Integration):
                 for cell in row["data"]
             ]
             row_dict = dict(zip(headers, row_values))
+
+            # Rename the "Unit" key to "Unit Name"
+            if "Unit" in row_dict:
+                row_dict["Unit Name"] = row_dict.pop("Unit")
+
+            # Extract the unit URL from row_data_attributes if available
+            unit_url = None
+            for attr in row.get("row_data_attributes", []):
+                if attr.get("key") == "href":
+                    unit_url = attr.get("value")
+                    break
+            row_dict["Unit URL"] = unit_url
+
+            # Split the unit URL to extract the unit_id (and potentially other parts)
+            if unit_url:
+                # Remove leading/trailing slashes and split the URL
+                parts = unit_url.strip("/").split("/")
+                # Expecting the format: ['properties', '1584', 'units', '5027']
+                if len(parts) >= 4:
+                    row_dict["Unit ID"] = parts[3]  # '5027'
+
+            # Extract the display name from the first cell (unit) of the row
+            unit_cell_html = row["data"][0]["value"]
+            unit_soup = BeautifulSoup(unit_cell_html, "html.parser")
+            # If needed, you can extract the display text separately,
+            # but the value is already assigned to "Unit Name"
 
             # Extract the occupant (tenant) ID from the Tenant cell, if available
             tenant_cell_html = row["data"][2]["value"]
@@ -676,7 +703,7 @@ class AppFolioIntegration(Integration):
 
             rows.append(row_dict)
 
-        # Return the final dictionary
+        # Return the final list of dictionaries
         return rows
 
     async def fetch_work_orders(self, status: str, start_date: str):
