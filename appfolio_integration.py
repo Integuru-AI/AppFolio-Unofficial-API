@@ -30,7 +30,7 @@ class AppFolioIntegration(Integration):
     async def initialize(self, network_requester=None, tokens: dict | str = None):
         self.network_requester = network_requester
         self.headers = {
-            'Host': 'ocf.appfolio.com',
+            "Host": "ocf.appfolio.com",
             "User-Agent": self.user_agent,
         }
 
@@ -59,34 +59,46 @@ class AppFolioIntegration(Integration):
             )
             return response
 
-        max_redirects = kwargs.pop('max_redirects', 5)
+        max_redirects = kwargs.pop("max_redirects", 5)
 
         async with aiohttp.ClientSession() as session:
             # First try with automatic redirects
             try:
-                async with session.request(method, url, allow_redirects=True, **kwargs) as response:
+                async with session.request(
+                    method, url, allow_redirects=True, **kwargs
+                ) as response:
                     if response.status == 200:
                         return await self._handle_response(response)
 
                     # If we still get a redirect status, fall back to manual handling
                     if response.status in (301, 302, 303, 307, 308):
                         print("Automatic redirect failed, handling manually")
-                        return await self._handle_manual_redirect(session, method, url, max_redirects, **kwargs)
+                        return await self._handle_manual_redirect(
+                            session, method, url, max_redirects, **kwargs
+                        )
 
                     return await self._handle_response(response)
 
             except aiohttp.ClientError as e:
-                print(f"Automatic redirect failed with error: {e}, attempting manual redirect")
-                return await self._handle_manual_redirect(session, method, url, max_redirects, **kwargs)
+                print(
+                    f"Automatic redirect failed with error: {e}, attempting manual redirect"
+                )
+                return await self._handle_manual_redirect(
+                    session, method, url, max_redirects, **kwargs
+                )
 
-    async def _handle_manual_redirect(self, session, method: str, url: str, max_redirects: int, **kwargs) -> str:
+    async def _handle_manual_redirect(
+        self, session, method: str, url: str, max_redirects: int, **kwargs
+    ) -> str:
         """Handle redirects manually when automatic redirects fail"""
         redirect_count = 0
         current_url = url
         current_method = method
 
         while redirect_count < max_redirects:
-            async with session.request(current_method, current_url, allow_redirects=False, **kwargs) as response:
+            async with session.request(
+                current_method, current_url, allow_redirects=False, **kwargs
+            ) as response:
                 if response.status in (301, 302, 303, 307, 308):
                     redirect_count += 1
                     next_url = response.headers.get("Location")
@@ -98,11 +110,15 @@ class AppFolioIntegration(Integration):
                         )
 
                     # Handle relative URLs
-                    if next_url.startswith('/'):
+                    if next_url.startswith("/"):
                         parsed_url = urllib.parse.urlparse(current_url)
-                        next_url = f"{parsed_url.scheme}://{parsed_url.netloc}{next_url}"
+                        next_url = (
+                            f"{parsed_url.scheme}://{parsed_url.netloc}{next_url}"
+                        )
 
-                    print(f"Following manual redirect {redirect_count}/{max_redirects}: {next_url}")
+                    print(
+                        f"Following manual redirect {redirect_count}/{max_redirects}: {next_url}"
+                    )
                     current_url = next_url
 
                     # For 303, always use GET for the redirect
@@ -119,7 +135,7 @@ class AppFolioIntegration(Integration):
         )
 
     async def _handle_response(
-            self, response: aiohttp.ClientResponse
+        self, response: aiohttp.ClientResponse
     ) -> Union[str, Any]:
         if response.status == 200 or response.ok:
             return await response.text()
@@ -175,11 +191,13 @@ class AppFolioIntegration(Integration):
         """
         try:
             # Parse the input date
-            date_obj = datetime.strptime(date_str, '%Y-%m-%d')
+            date_obj = datetime.strptime(date_str, "%Y-%m-%d")
             # Format it according to RFC 2822 with GMT timezone
-            return date_obj.strftime('%a, %d %b %Y %H:%M:%S GMT')
+            return date_obj.strftime("%a, %d %b %Y %H:%M:%S GMT")
         except ValueError as e:
-            raise ValueError(f"Invalid date format. Please use YYYY-MM-DD format. Error: {e}")
+            raise ValueError(
+                f"Invalid date format. Please use YYYY-MM-DD format. Error: {e}"
+            )
 
     @staticmethod
     def denormalize_response(response_json: dict) -> list:
@@ -195,70 +213,145 @@ class AppFolioIntegration(Integration):
         """
         # Create a lookup dictionary for included items
         included_lookup = {}
-        for item in response_json.get('included', []):
-            key = (item['type'], item['id'])
+        for item in response_json.get("included", []):
+            key = (item["type"], item["id"])
             included_lookup[key] = item
 
         def resolve_relationship(relationship):
             """Helper function to resolve a single relationship"""
-            if not relationship or 'data' not in relationship:
+            if not relationship or "data" not in relationship:
                 return None
 
-            rel_data = relationship['data']
+            rel_data = relationship["data"]
             if not rel_data:  # Handle null relationships
                 return None
 
             # Handle both single items and arrays
             if isinstance(rel_data, list):
-                return [included_lookup.get((item['type'], item['id'])) for item in rel_data]
+                return [
+                    included_lookup.get((item["type"], item["id"])) for item in rel_data
+                ]
             else:
-                key = (rel_data['type'], rel_data['id'])
+                key = (rel_data["type"], rel_data["id"])
                 return included_lookup.get(key)
 
         def process_data_item(item):
             """Process a single data item and its relationships"""
             result = {
-                'id': item['id'],
-                'type': item['type'],
+                "id": item["id"],
+                "type": item["type"],
                 # 'link': item.get('links', {}).get('page'),
-                **item.get('attributes', {}),
-                **item.get('links', {}),
+                **item.get("attributes", {}),
+                **item.get("links", {}),
             }
 
             # Process each relationship
-            relationships = item.get('relationships', {})
+            relationships = item.get("relationships", {})
             for rel_name, rel_data in relationships.items():
                 resolved = resolve_relationship(rel_data)
                 if resolved:
                     # If it's a list of relationships, get their attributes
                     if isinstance(resolved, list):
                         result[rel_name] = [
-                            {**r.get('attributes', {}), 'id': r['id'], 'type': r['type']}
-                            for r in resolved if r
+                            {
+                                **r.get("attributes", {}),
+                                "id": r["id"],
+                                "type": r["type"],
+                            }
+                            for r in resolved
+                            if r
                         ]
                     else:
                         # For single relationships, merge attributes directly
                         result[rel_name] = {
-                            **resolved.get('attributes', {}),
-                            'id': resolved['id'],
-                            'type': resolved['type']
+                            **resolved.get("attributes", {}),
+                            "id": resolved["id"],
+                            "type": resolved["type"],
                         }
 
                         # Special handling for nested relationships (like property.address)
-                        nested_relationships = resolved.get('relationships', {})
+                        nested_relationships = resolved.get("relationships", {})
                         for nested_name, nested_rel in nested_relationships.items():
                             nested_resolved = resolve_relationship(nested_rel)
                             if nested_resolved:
                                 result[f"{rel_name}_{nested_name}"] = {
-                                    **nested_resolved.get('attributes', {}),
-                                    'id': nested_resolved['id'],
-                                    'type': nested_resolved['type']
+                                    **nested_resolved.get("attributes", {}),
+                                    "id": nested_resolved["id"],
+                                    "type": nested_resolved["type"],
                                 }
 
             return result
 
         # Process all data items
-        return [process_data_item(item) for item in response_json['data']]
+        return [process_data_item(item) for item in response_json["data"]]
+
+    async def fetch_tenancies(self):
+        url = f"{self.url}/api/tenancies"
+        response = await self._make_request("GET", url)
+        return response
+
+    async def fetch_units(self, property_url: str):
+        params = {"items_per_page": 1000}
+        url = f"{property_url}/units"
+        headers = self.headers.copy()
+
+        headers["Accept-Version"] = "v2"
+        headers.update(
+            {
+                "accept": "application/json, text/javascript, */*; q=0.01",
+                "accept-language": "en-US,en;q=0.7",
+                "x-requested-with": "XMLHttpRequest",
+            }
+        )
+
+        response = await self._make_request("GET", url, headers=headers, params=params)
+        # print(response)
+        # Parse the JSON response
+        data = json.loads(response)
+        print(data)
+        # Extract headers from the header HTML
+        thead_html = data["thead_row"]
+        soup = BeautifulSoup(thead_html, "html.parser")
+        headers = [th.get_text(strip=True) for th in soup.find_all("th")]
+
+        # Parse each row into a dictionary
+        rows = []
+        for row in data["body_row_data"]:
+            # Clean each cell's HTML and get text values
+            row_values = [
+                BeautifulSoup(cell["value"], "html.parser").get_text(strip=True)
+                for cell in row["data"]
+            ]
+            row_dict = dict(zip(headers, row_values))
+
+            # Extract the occupant (tenant) ID from the Tenant cell, if available
+            tenant_cell_html = row["data"][2]["value"]
+            tenant_soup = BeautifulSoup(tenant_cell_html, "html.parser")
+            a_tag = tenant_soup.find("a")
+            occupant_id = None
+            if a_tag and a_tag.has_attr("href"):
+                href = a_tag["href"]
+                if "/occupancies/" in href:
+                    occupant_id = href.split("/occupancies/")[-1]
+            row_dict["Occupant ID"] = occupant_id
+
+            # Split the Lease Start/End value into separate fields
+            lease_value = row_dict.get("Lease Start/End", "").strip()
+            if lease_value and lease_value != "N/A" and " - " in lease_value:
+                lease_start, lease_end = [
+                    x.strip() for x in lease_value.split(" - ", 1)
+                ]
+            else:
+                lease_start, lease_end = None, None
+            row_dict["Lease Start"] = lease_start
+            row_dict["Lease End"] = lease_end
+            # Remove the original combined lease key
+            row_dict.pop("Lease Start/End", None)
+
+            rows.append(row_dict)
+
+        # Return the final dictionary
+        return rows
 
     async def fetch_work_orders(self, status: str, start_date: str):
         params = {
@@ -266,7 +359,6 @@ class AppFolioIntegration(Integration):
             # "page[number]": "1",
             "filter[created_at__gteq]": self._format_date(start_date),
             "sort": "-created_at",
-
             # Fields parameters
             "fields[work_orders]": "id,created_at,scheduled_start,scheduled_end,display_number,instructions,remarks,status,updated_at",
             "fields[occupancies]": "id,name",
@@ -280,12 +372,10 @@ class AppFolioIntegration(Integration):
             "fields[companies]": "name",
             "fields[service_requests]": "id,request_type",
             "fields[work_order_activities]": "comments,details,occurred_at",
-
             # Stats parameter
             "stats[work_orders]": "send_surveys_automatically",
-
             # Include parameter
-            "include": "occupancy,unit,work_order_assigned_users.user,work_order_category,vendor,vendor_company,service_request,property,property.address"
+            "include": "occupancy,unit,work_order_assigned_users.user,work_order_category,vendor,vendor_company,service_request,property,property.address",
         }
         filter_status_code = self._get_state_code(status)
         if filter_status_code:
@@ -347,41 +437,49 @@ class AppFolioIntegration(Integration):
         description_element = soup.select_one("div.js-work-order-description")
         if description_element:
             description = description_element.text.strip()
-            work_order_data['description'] = description
+            work_order_data["description"] = description
 
         # get property, owner and resident info
         property_card_element = soup.select_one("div.js-property-contact-card")
         if property_card_element:
-            property_card_data = property_card_element.select_one("div.js-contact-card-details")
+            property_card_data = property_card_element.select_one(
+                "div.js-contact-card-details"
+            )
             card_data_spans = property_card_data.select("span")
             property_data = "\n".join(span.text.strip() for span in card_data_spans)
-            work_order_data['property'] = property_data.strip().replace("-5\n", "")
+            work_order_data["property"] = property_data.strip().replace("-5\n", "")
 
         owner_card_element = soup.select_one("div.js-owner-contact-card")
         if owner_card_element:
             owner_data = {}
             owner_name_span = owner_card_element.select_one("span.contact-card__name")
             if owner_name_span:
-                owner_data['name'] = owner_name_span.text.strip()
+                owner_data["name"] = owner_name_span.text.strip()
 
-            owner_contact_element = owner_card_element.select_one("div.js-contact-card-details")
+            owner_contact_element = owner_card_element.select_one(
+                "div.js-contact-card-details"
+            )
             owner_contact_text = self._extract_text_from_div(owner_contact_element)
-            owner_data['data'] = owner_contact_text
+            owner_data["data"] = owner_contact_text
 
-            work_order_data['owner'] = owner_data
+            work_order_data["owner"] = owner_data
 
         resident_card_element = soup.select_one("div.js-tenant-contact-card")
         if resident_card_element:
             resident_data = {}
-            resident_name_span = resident_card_element.select_one("span.contact-card__name")
+            resident_name_span = resident_card_element.select_one(
+                "span.contact-card__name"
+            )
             if resident_name_span:
-                resident_data['name'] = resident_name_span.text.strip()
+                resident_data["name"] = resident_name_span.text.strip()
 
-            extra_div_element = resident_card_element.select_one("div.js-contact-card-details")
+            extra_div_element = resident_card_element.select_one(
+                "div.js-contact-card-details"
+            )
             extra_text = self._extract_text_from_div(extra_div_element)
-            resident_data['data'] = extra_text.strip()
+            resident_data["data"] = extra_text.strip()
 
-            work_order_data['resident'] = resident_data
+            work_order_data["resident"] = resident_data
 
         # get vendor info
         vendor_element = soup.select_one("div.js-vendor-contact-card")
@@ -389,7 +487,9 @@ class AppFolioIntegration(Integration):
             vendor_name_element = vendor_element.select_one("span.contact-card__name")
             vendor_name = vendor_name_element.text.strip()
 
-            vendor_contact_element = vendor_element.select_one("div.js-contact-card-details")
+            vendor_contact_element = vendor_element.select_one(
+                "div.js-contact-card-details"
+            )
             vendor_contact = None
             if vendor_contact_element:
                 contact_spans = vendor_contact_element.select("span")
@@ -399,15 +499,17 @@ class AppFolioIntegration(Integration):
                 "name": vendor_name,
                 "contact": vendor_contact,
             }
-            work_order_data['vendor'] = vendor
+            work_order_data["vendor"] = vendor
 
         # get priority information
         priority_element = soup.find("span", text="Priority:")
         if priority_element:
-            priority_element_value = soup.select_one("span.js-service-request-header-priority")
+            priority_element_value = soup.select_one(
+                "span.js-service-request-header-priority"
+            )
             if priority_element_value:
                 priority = priority_element_value.text.strip()
-                work_order_data['priority'] = priority
+                work_order_data["priority"] = priority
 
         # get actions information
         actions_element = soup.select_one("div.js-activity-log")
