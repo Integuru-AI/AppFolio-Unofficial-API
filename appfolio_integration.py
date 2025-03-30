@@ -285,10 +285,59 @@ class AppFolioIntegration(Integration):
         # Process all data items
         return [process_data_item(item) for item in response_json["data"]]
 
-    async def fetch_tenancies(self):
-        url = f"{self.url}/api/tenancies"
-        response = await self._make_request("GET", url)
-        return response
+    async def fetch_all_tenants(self, page: int = 1):
+        url = f"{self.url}/occupancies"
+        params = {"page": page, "sort[by]": "name", "sort[order]": "asc"}
+        headers = self.headers.copy()
+        headers.update(
+            {
+                "sec-gpc": "1",
+                "x-requested-with": "XMLHttpRequest",
+                "accept": "application/json, text/javascript, */*; q=0.01",
+                "accept-language": "en-US,en;q=0.7",
+            }
+        )
+        response = await self._make_request("GET", url, params=params, headers=headers)
+        data = json.loads(response)
+        # Parse header row from the HTML
+        thead_html = data.get("thead_row", "")
+        soup = BeautifulSoup(thead_html, "html.parser")
+        headers = [th.get_text(strip=True) for th in soup.find_all("th")]
+
+        table = []
+        for row in data.get("body_row_data", []):
+            # Get each cell's HTML value, extract text, and pad if missing
+            row_cells = row.get("data", [])
+            row_values = [
+                BeautifulSoup(cell.get("value", ""), "html.parser").get_text(strip=True)
+                for cell in row_cells
+            ]
+            if len(row_values) < len(headers):
+                row_values.extend([""] * (len(headers) - len(row_values)))
+            row_dict = dict(zip(headers, row_values))
+
+            # Extract occupancy and selected tenant IDs from the "Name" cell (first column)
+            name_cell_html = row_cells[0].get("value", "") if row_cells else ""
+            name_soup = BeautifulSoup(name_cell_html, "html.parser")
+            a_tag = name_soup.find("a")
+            occupancy_id, selected_tenant_id = None, None
+            if a_tag and a_tag.has_attr("href"):
+                href = a_tag["href"]
+                parts = href.strip("/").split("/")
+                # Expected URL pattern: /occupancies/<occupancy_id>/selected_tenant/<tenant_id>
+                if (
+                    len(parts) >= 4
+                    and parts[0] == "occupancies"
+                    and parts[2] == "selected_tenant"
+                ):
+                    occupancy_id = parts[1]
+                    selected_tenant_id = parts[3]
+            row_dict["Occupancy ID"] = occupancy_id
+            row_dict["Selected Tenant ID"] = selected_tenant_id
+
+            table.append(row_dict)
+        # Print the resulting table dictionary without outputting the huge original JSON
+        return table
 
     async def fetch_units(self, property_url: str):
         params = {"items_per_page": 1000}
@@ -391,7 +440,9 @@ class AppFolioIntegration(Integration):
         page_index = 1
         while True:
             params.update({"page[number]": f"{page_index}"})
-            response = await self._make_request("GET", url, headers=headers, params=params)
+            response = await self._make_request(
+                "GET", url, headers=headers, params=params
+            )
             try:
                 response = json.loads(response)
             except json.decoder.JSONDecodeError:
@@ -407,13 +458,13 @@ class AppFolioIntegration(Integration):
 
         work_orders = []
         for order in raw_wo_list:
-            parsed_order = await self._parse_work_order_page(url=order.get('page'))
-            if order.get('vendor_company'):
-                order.pop('vendor_company')
-            if order.get('remarks'):
-                order.pop('remarks')
-            if order.get('work_order_assigned_users'):
-                order.pop('work_order_assigned_users')
+            parsed_order = await self._parse_work_order_page(url=order.get("page"))
+            if order.get("vendor_company"):
+                order.pop("vendor_company")
+            if order.get("remarks"):
+                order.pop("remarks")
+            if order.get("work_order_assigned_users"):
+                order.pop("work_order_assigned_users")
 
             order.update(parsed_order)
             work_orders.append(order)
@@ -422,12 +473,18 @@ class AppFolioIntegration(Integration):
 
     async def _parse_work_order_page(self, url: str):
         headers = self.headers.copy()
-        headers[
-            "Accept"] = "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/png,image/svg+xml,*/*;q=0.8"
+        headers["Accept"] = (
+            "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/png,image/svg+xml,*/*;q=0.8"
+        )
 
         # include extra parameters to support massive header sizes
-        response = await self._make_request("GET", url, headers=headers, max_line_size=8190 * 15,
-                                            max_field_size=8190 * 15)
+        response = await self._make_request(
+            "GET",
+            url,
+            headers=headers,
+            max_line_size=8190 * 15,
+            max_field_size=8190 * 15,
+        )
         soup = self._create_soup(response)
 
         work_order_data = {}
@@ -520,13 +577,15 @@ class AppFolioIntegration(Integration):
                 activity_text = self._extract_text_from_div(row)
                 actions.append(activity_text)
 
-            work_order_data['actions'] = actions
+            work_order_data["actions"] = actions
 
         # get vendor instructions
-        vendor_instructions_element = soup.select_one("div.js-work-order-vendor-instructions")
+        vendor_instructions_element = soup.select_one(
+            "div.js-work-order-vendor-instructions"
+        )
         if vendor_instructions_element:
             instructions = self._extract_text_from_div(vendor_instructions_element)
-            work_order_data['vendor_instructions'] = instructions
+            work_order_data["vendor_instructions"] = instructions
 
         # get work order notes
         notes_element = soup.select_one("div#notes")
@@ -534,13 +593,13 @@ class AppFolioIntegration(Integration):
             notes_card_element = notes_element.select_one("div.card-body")
             if notes_card_element:
                 notes = await self._fetch_notes(service_id=service_id)
-                work_order_data['notes'] = notes
+                work_order_data["notes"] = notes
 
         # get attachments
         attachments_element = soup.select_one("div.js-work-order-body__attachments")
         if attachments_element:
             attachments = await self._fetch_attachments(service_id=service_id)
-            work_order_data['attachments'] = attachments
+            work_order_data["attachments"] = attachments
 
         # get task assignee
         assignee_element = soup.select_one("div.js-assigned-to")
@@ -550,26 +609,27 @@ class AppFolioIntegration(Integration):
             for each in assigned_to_elements:
                 assigned_to_name = each.text.strip()
                 assignees.append(assigned_to_name)
-            work_order_data['assigned_to'] = assignees
+            work_order_data["assigned_to"] = assignees
 
         return work_order_data
 
     async def _fetch_notes(self, service_id: str):
         params = {
-            'add_notes_for_id': f'{service_id}',
-            'add_notes_for_type': 'Maintenance::ServiceRequestDecorator',
-            'show_all': 'true',
-            'show_notes_for_id': f'{service_id}',
-            'show_notes_for_type': 'Maintenance::ServiceRequestDecorator',
+            "add_notes_for_id": f"{service_id}",
+            "add_notes_for_type": "Maintenance::ServiceRequestDecorator",
+            "show_all": "true",
+            "show_notes_for_id": f"{service_id}",
+            "show_notes_for_type": "Maintenance::ServiceRequestDecorator",
         }
         url = f"{self.url}/notes"
         headers = self.headers.copy()
-        headers[
-            'Accept'] = '*/*;q=0.5, text/javascript, application/javascript, application/ecmascript, application/x-ecmascript'
+        headers["Accept"] = (
+            "*/*;q=0.5, text/javascript, application/javascript, application/ecmascript, application/x-ecmascript"
+        )
 
         response = await self._make_request("GET", url, headers=headers, params=params)
         # regex matching was not consistent
-        start_idx = response.find('.html(')
+        start_idx = response.find(".html(")
         if start_idx == -1:
             return None
 
@@ -584,11 +644,11 @@ class AppFolioIntegration(Integration):
             return None
 
         # Extract the content between quotes
-        content = response[content_start + 1:content_end]
+        content = response[content_start + 1 : content_end]
         # Replace escaped characters
         content = content.replace('\\"', '"')  # Unescape quotes
-        content = content.replace('\\n', '\n')  # Handle newlines
-        content = content.replace('\\/', '/')  # Handle forward slashes
+        content = content.replace("\\n", "\n")  # Handle newlines
+        content = content.replace("\\/", "/")  # Handle forward slashes
         content = content.strip()
 
         soup = self._create_soup(content)
@@ -610,8 +670,8 @@ class AppFolioIntegration(Integration):
     async def _fetch_attachments(self, service_id: str):
         url = f"{self.url}/api/work_orders?filter[service_request][id]={service_id}&fields[service_requests]=id&fields[work_orders]=remarks,display_number&fields[attachments]=name,preview_url,created_at,size&include=visible_attachments"
         headers = self.headers.copy()
-        headers['Accept'] = "application/vnd.api+json"
-        headers['Accept-Version'] = "v2"
+        headers["Accept"] = "application/vnd.api+json"
+        headers["Accept-Version"] = "v2"
 
         response = await self._make_request("GET", url, headers=headers)
         try:
@@ -620,11 +680,11 @@ class AppFolioIntegration(Integration):
             print("failed to decode response for fetching attachments")
             return None
 
-        included: list = response['included']
+        included: list = response["included"]
         attachments = []
         for included_item in included:
-            if included_item.get('type') == "attachments":
-                attached = included_item.get('attributes')
+            if included_item.get("type") == "attachments":
+                attached = included_item.get("attributes")
                 attachments.append(attached)
 
         return attachments
@@ -632,22 +692,24 @@ class AppFolioIntegration(Integration):
     async def fetch_vacancies(self):
         url = f"{self.url}/vacancies"
         params = {
-            'filters[properties_ids]': '',
-            'filters[bedrooms]': '',
-            'filters[min_rent]': '',
-            'filters[max_rent]': '',
-            'filters[available_from]': '',
-            'filters[available_to]': '',
-            'filters[cats]': '',
-            'filters[dogs]': '',
-            'filters[sort_by]': 'websitePostingVisible',
+            "filters[properties_ids]": "",
+            "filters[bedrooms]": "",
+            "filters[min_rent]": "",
+            "filters[max_rent]": "",
+            "filters[available_from]": "",
+            "filters[available_to]": "",
+            "filters[cats]": "",
+            "filters[dogs]": "",
+            "filters[sort_by]": "websitePostingVisible",
         }
         headers = self.headers.copy()
-        headers['Accept'] = "application/json; q=0.01"
-        response = await self._make_request("GET", url=url, headers=headers, params=params)
+        headers["Accept"] = "application/json; q=0.01"
+        response = await self._make_request(
+            "GET", url=url, headers=headers, params=params
+        )
         try:
             response = json.loads(response)
-            results_html = response.get('results_html')
+            results_html = response.get("results_html")
         except json.decoder.JSONDecodeError:
             print(f"not json response: {response[:300]}")
             results_html = response
@@ -675,16 +737,21 @@ class AppFolioIntegration(Integration):
         try:
             headers = self.headers.copy()
             # headers['Accept'] = 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
-            headers['Accept'] = '*/*'
+            headers["Accept"] = "*/*"
 
             parsed = self._parse_vacancy_card(card=vacancy_item)
-            property_url = parsed.get('link')
+            property_url = parsed.get("link")
             if "campaigns" in property_url:
                 # the response for this is js and has html elements for the modal; the actual url is in here
-                campaign_resp = await self._make_request("GET", url=property_url, headers=headers,
-                                                         max_line_size=8190 * 15, max_field_size=8190 * 15)
+                campaign_resp = await self._make_request(
+                    "GET",
+                    url=property_url,
+                    headers=headers,
+                    max_line_size=8190 * 15,
+                    max_field_size=8190 * 15,
+                )
                 d_start = campaign_resp.find("campaign_unit_type_link")
-                c_data = campaign_resp[d_start:d_start + 150]
+                c_data = campaign_resp[d_start : d_start + 150]
                 pattern = r'href=[\'"]([^\'"]*)[\'"]'
                 match = re.search(pattern, c_data)
 
@@ -705,8 +772,13 @@ class AppFolioIntegration(Integration):
             if property_url is None:
                 return parsed
 
-            property_page = await self._make_request(method="GET", url=property_url, headers=headers,
-                                                     max_line_size=8190 * 15, max_field_size=8190 * 15)
+            property_page = await self._make_request(
+                method="GET",
+                url=property_url,
+                headers=headers,
+                max_line_size=8190 * 15,
+                max_field_size=8190 * 15,
+            )
             page_soup = self._create_soup(property_page)
             page_data = self._parse_vacancy_page(soup=page_soup)
 
@@ -725,18 +797,24 @@ class AppFolioIntegration(Integration):
 
         unit_desc_elem = soup.select_one("div.unit-name-and-address")
         if unit_desc_elem is not None:
-            unit_type_elem = unit_desc_elem.select_one("div.js-unit_template_key_value_datapair")
+            unit_type_elem = unit_desc_elem.select_one(
+                "div.js-unit_template_key_value_datapair"
+            )
             if unit_type_elem is not None:
                 unit_type = unit_type_elem.select_one("div.datapair__value")
                 unit_data["type"] = unit_type.text.strip()
 
         property_desc_elem = soup.select_one("div.property-name-and-address")
         if property_desc_elem is not None:
-            property_type_elem = property_desc_elem.select_one("div#property_type_value")
+            property_type_elem = property_desc_elem.select_one(
+                "div#property_type_value"
+            )
             if property_type_elem is not None:
                 property_data["type"] = property_type_elem.text.strip()
 
-            county_elem = property_desc_elem.select_one("div.js-marketing-property-county")
+            county_elem = property_desc_elem.select_one(
+                "div.js-marketing-property-county"
+            )
             if county_elem is not None:
                 property_data["county"] = county_elem.text.strip()
 
@@ -760,7 +838,9 @@ class AppFolioIntegration(Integration):
             unit_rental_info = AppFolioIntegration._parse_data_pairs(info_pairs)
             unit_data["rental_info"] = unit_rental_info
 
-        property_rental_info_elem = soup.select_one("div#property_rental_information_show")
+        property_rental_info_elem = soup.select_one(
+            "div#property_rental_information_show"
+        )
         if property_rental_info_elem is not None:
             info_pairs = property_rental_info_elem.select("div.datapair")
             property_rental_info = AppFolioIntegration._parse_data_pairs(info_pairs)
@@ -778,36 +858,44 @@ class AppFolioIntegration(Integration):
             unit_info = AppFolioIntegration._parse_data_pairs(info_pairs)
             unit_data["marketing_info"] = unit_info
 
-        property_marketing_elem = soup.select_one("div#property_marketing_information_show")
+        property_marketing_elem = soup.select_one(
+            "div#property_marketing_information_show"
+        )
         if property_marketing_elem is not None:
             info_pairs = property_marketing_elem.select("div.datapair")
             property_info = AppFolioIntegration._parse_data_pairs(info_pairs)
             property_data["marketing_info"] = property_info
 
         # for campaign pages
-        campaign_rental_elem = soup.select_one("div#unit_template_basic_information_show")
+        campaign_rental_elem = soup.select_one(
+            "div#unit_template_basic_information_show"
+        )
         if campaign_rental_elem is not None:
             info_pairs = campaign_rental_elem.select("div.datapair")
             campaign_rental_info = AppFolioIntegration._parse_data_pairs(info_pairs)
             campaign_unit_data["rental_info"] = campaign_rental_info
 
-        campaign_marketing_elem = soup.select_one("div#unit_template_basic_information_show")
+        campaign_marketing_elem = soup.select_one(
+            "div#unit_template_basic_information_show"
+        )
         if campaign_marketing_elem is not None:
             info_pairs = campaign_marketing_elem.select("div.datapair")
             campaign_marketing_info = AppFolioIntegration._parse_data_pairs(info_pairs)
             campaign_unit_data["marketing_info"] = campaign_marketing_info
 
         # First find the h2 with "Amenities" text
-        amenities_header = soup.find('h2', text=lambda text: text and text.strip() == 'Amenities')
+        amenities_header = soup.find(
+            "h2", text=lambda text: text and text.strip() == "Amenities"
+        )
 
         # Navigate to the card-header div
         if amenities_header:
-            if data.get('amenities') is None:
-                card_header = amenities_header.find_parent('div', class_='card-header')
+            if data.get("amenities") is None:
+                card_header = amenities_header.find_parent("div", class_="card-header")
 
                 # Then find the parent section element
                 if card_header:
-                    section_parent = card_header.find_parent('section')
+                    section_parent = card_header.find_parent("section")
                     if section_parent is not None:
                         info_pairs = section_parent.select("div.datapair")
                         amenities = AppFolioIntegration._parse_data_pairs(info_pairs)
@@ -839,17 +927,17 @@ class AppFolioIntegration(Integration):
         vacancy = {}
         name_elem = card.select_one("span.js-card-title")
         if name_elem is not None:
-            vacancy['name'] = name_elem.text.strip()
+            vacancy["name"] = name_elem.text.strip()
 
             link_elem = name_elem.select_one("a")
             link = link_elem.get("href")
-            vacancy['link'] = "https://ocf.appfolio.com" + link
+            vacancy["link"] = "https://ocf.appfolio.com" + link
 
         address_elem = card.select_one("span.js-card-address")
         if address_elem is not None:
             address = address_elem.text.strip()
             address = address.split("Edit")[0]
-            vacancy['address'] = address
+            vacancy["address"] = address
 
         rent_table_elem = card.select_one("table.unit-property-card__table")
         if rent_table_elem is not None:
@@ -857,7 +945,9 @@ class AppFolioIntegration(Integration):
             table_bits = rent_table_elem.select("td")
             for item in table_bits:
                 item_data = {}
-                item_title_elem = item.select_one("span.unit-property-card__tiny-header")
+                item_title_elem = item.select_one(
+                    "span.unit-property-card__tiny-header"
+                )
                 item_title = item_title_elem.text.strip()
                 item_title = codecs.decode(item_title, "unicode-escape")
                 item_value_elem = item.select_one('[class^="js-card"]')
@@ -867,34 +957,36 @@ class AppFolioIntegration(Integration):
                 item_data[item_title] = item_value
                 rent_data.append(item_data)
 
-            vacancy['rent_data'] = rent_data
+            vacancy["rent_data"] = rent_data
 
         actions_elem = card.select_one("div.action-table")
         rent_status_card = actions_elem.select_one("p.js-vacancy-type")
         if rent_status_card is not None:
             rent_status = rent_status_card.text.strip()
-            vacancy['rent_status'] = rent_status
+            vacancy["rent_status"] = rent_status
 
         actions_table_elem = actions_elem.select_one("table")
         if actions_table_elem is not None:
             website_status_row = actions_table_elem.select_one("tr.js-website-tasks")
             if website_status_row is not None:
                 value_elem = website_status_row.select_one("td.js-task-status")
-                vacancy['website_status'] = value_elem.text.strip()
+                vacancy["website_status"] = value_elem.text.strip()
 
             internet_status_row = actions_table_elem.select_one("tr.js-internet-tasks")
             if internet_status_row is not None:
                 value_elem = internet_status_row.select_one("td.js-task-status")
-                vacancy['internet_status'] = value_elem.text.strip()
+                vacancy["internet_status"] = value_elem.text.strip()
 
             premium_status_row = actions_table_elem.select_one("tr.js-premium-tasks")
             if premium_status_row is not None:
                 value_elem = premium_status_row.select_one("td.js-task-status")
-                vacancy['premium_status'] = value_elem.text.strip()
+                vacancy["premium_status"] = value_elem.text.strip()
 
-            refresh_status_row = actions_table_elem.select_one("td.action-table__refresh-container")
+            refresh_status_row = actions_table_elem.select_one(
+                "td.action-table__refresh-container"
+            )
             if refresh_status_row is not None:
-                vacancy['last_updated'] = refresh_status_row.text.strip()
+                vacancy["last_updated"] = refresh_status_row.text.strip()
 
         return vacancy
 
@@ -906,7 +998,7 @@ class AppFolioIntegration(Integration):
         response = await self._make_request("GET", url=url, headers=headers)
         try:
             response = json.loads(response)
-            results_html = response.get('results_html')
+            results_html = response.get("results_html")
         except json.decoder.JSONDecodeError:
             print(f"not json response: {response[300:1000]}")
             results_html = response
@@ -932,26 +1024,26 @@ class AppFolioIntegration(Integration):
         soup = AppFolioIntegration._create_soup(html_content)
 
         # Find the table
-        table = soup.find('table', id='lease_documents_list_table')
+        table = soup.find("table", id="lease_documents_list_table")
 
         # Get table headers
         headers = []
-        for th in table.find_all('th'):
+        for th in table.find_all("th"):
             headers.append(th.text.strip())
 
         # Process each row
         result = []
-        for row in table.find('tbody').find_all('tr'):
+        for row in table.find("tbody").find_all("tr"):
             row_data = {}
 
             # Get the document ID from the data-href attribute
-            data_href = row.get('data-href', '')
+            data_href = row.get("data-href", "")
             if data_href:
-                document_id = data_href.split('/')[-1]
-                row_data['document_id'] = document_id
+                document_id = data_href.split("/")[-1]
+                row_data["document_id"] = document_id
 
             # Process each cell in the row
-            cells = row.find_all('td')
+            cells = row.find_all("td")
 
             # Get tenant names (split by <br> tags)
             tenants_cell = cells[0]
@@ -969,14 +1061,11 @@ class AppFolioIntegration(Integration):
 
             # Action info
             action_cell = cells[4]
-            action_link = action_cell.find('a')
+            action_link = action_cell.find("a")
             if action_link:
                 action_text = action_link.text.strip()
-                action_href = "https://ocf.appfolio.com" + action_link.get('href', '')
-                row_data['action'] = {
-                    'text': action_text,
-                    'link': action_href
-                }
+                action_href = "https://ocf.appfolio.com" + action_link.get("href", "")
+                row_data["action"] = {"text": action_text, "link": action_href}
 
             result.append(row_data)
 
@@ -985,19 +1074,21 @@ class AppFolioIntegration(Integration):
     async def fetch_properties(self):
         url = f"{self.url}/properties"
         params = {
-            'hoa_index_page': 'false',
-            'include_hidden_properties': 'true',
+            "hoa_index_page": "false",
+            "include_hidden_properties": "true",
             # 'page': '1',
-            'sort[by]': 'name',
-            'sort[order]': 'asc',
+            "sort[by]": "name",
+            "sort[order]": "asc",
         }
         page = 1
         properties = []
         last_list = []
         while True:
-            params['page'] = page
+            params["page"] = page
             print(page)
-            response = await self._make_request("GET", url=url, params=params, headers=self.headers)
+            response = await self._make_request(
+                "GET", url=url, params=params, headers=self.headers
+            )
             current = self._parse_properties_table(response)
             if last_list == current or current is None:
                 break
@@ -1025,51 +1116,71 @@ class AppFolioIntegration(Integration):
             return None
 
         # Create BeautifulSoup object
-        soup = BeautifulSoup(html_content, 'html.parser')
+        soup = BeautifulSoup(html_content, "html.parser")
         properties = []
 
         # Check if we have the newer JSON format in data-initial-state
-        properties_table_div = soup.find('div', id='properties_table')
-        if properties_table_div and properties_table_div.get('data-initial-state'):
+        properties_table_div = soup.find("div", id="properties_table")
+        if properties_table_div and properties_table_div.get("data-initial-state"):
             try:
                 # Parse the JSON data from data-initial-state attribute
-                initial_state = json.loads(properties_table_div['data-initial-state'])
+                initial_state = json.loads(properties_table_div["data-initial-state"])
 
                 # Process each row in body_row_data
-                for row in initial_state.get('body_row_data', []):
-                    row_data = row.get('data', [])
+                for row in initial_state.get("body_row_data", []):
+                    row_data = row.get("data", [])
                     if len(row_data) < 5:
                         continue
 
                     # Extract HTML content for address cell (first column)
-                    address_html = row_data[0].get('value', '')
-                    address_soup = BeautifulSoup(address_html, 'html.parser')
-                    address_link = address_soup.find('a')
+                    address_html = row_data[0].get("value", "")
+                    address_soup = BeautifulSoup(address_html, "html.parser")
+                    address_link = address_soup.find("a")
 
                     if not address_link:
                         continue
 
                     # Extract address parts
-                    address_parts = [part.strip() for part in address_link.get_text(separator='\n').strip().split('\n')]
-                    address_parts = [part for part in address_parts if part]  # Remove empty strings
+                    address_parts = [
+                        part.strip()
+                        for part in address_link.get_text(separator="\n")
+                        .strip()
+                        .split("\n")
+                    ]
+                    address_parts = [
+                        part for part in address_parts if part
+                    ]  # Remove empty strings
 
                     # Parse property info
-                    property_obj = AppFolioIntegration._parse_address_parts(address_parts)
+                    property_obj = AppFolioIntegration._parse_address_parts(
+                        address_parts
+                    )
 
                     # Extract property URL
-                    if address_link.get('href'):
-                        property_obj['url'] = address_link['href']
+                    if address_link.get("href"):
+                        property_obj["url"] = address_link["href"]
 
                     # Extract property type, units, vacancy
-                    property_obj['type'] = BeautifulSoup(row_data[1].get('value', ''), 'html.parser').text.strip()
-                    property_obj['units'] = BeautifulSoup(row_data[2].get('value', ''), 'html.parser').text.strip()
-                    property_obj['vacant'] = BeautifulSoup(row_data[3].get('value', ''), 'html.parser').text.strip() == 'Yes'
+                    property_obj["type"] = BeautifulSoup(
+                        row_data[1].get("value", ""), "html.parser"
+                    ).text.strip()
+                    property_obj["units"] = BeautifulSoup(
+                        row_data[2].get("value", ""), "html.parser"
+                    ).text.strip()
+                    property_obj["vacant"] = (
+                        BeautifulSoup(
+                            row_data[3].get("value", ""), "html.parser"
+                        ).text.strip()
+                        == "Yes"
+                    )
 
                     # Extract owner information
-                    owner_html = row_data[4].get('value', '')
-                    owner_soup = BeautifulSoup(owner_html, 'html.parser')
-                    owner_span = owner_soup.find('span', class_='u-align-middle')
-                    property_obj['owner'] = owner_span.text.strip() if owner_span else None
+                    owner_html = row_data[4].get("value", "")
+                    owner_soup = BeautifulSoup(owner_html, "html.parser")
+                    owner_span = owner_soup.find("span", class_="u-align-middle")
+                    property_obj["owner"] = (
+                        owner_span.text.strip() if owner_span else None
+                    )
 
                     properties.append(property_obj)
 
@@ -1080,51 +1191,70 @@ class AppFolioIntegration(Integration):
                 pass
 
         # If no JSON data is found or parsing failed, try traditional HTML parsing
-        table = soup.find('table', class_='table')
+        table = soup.find("table", class_="table")
 
         # Check if table exists
         if not table:
-            if properties:  # If we have properties from JSON parsing but encountered an error
+            if (
+                properties
+            ):  # If we have properties from JSON parsing but encountered an error
                 return json.dumps(properties, indent=2)
-            return json.dumps({"error": "Properties table not found in the HTML content"})
+            return json.dumps(
+                {"error": "Properties table not found in the HTML content"}
+            )
 
         # Process rows and extract data
-        tbody = table.find('tbody')
+        tbody = table.find("tbody")
         if not tbody:
-            if properties:  # If we have properties from JSON parsing but encountered an error
+            if (
+                properties
+            ):  # If we have properties from JSON parsing but encountered an error
                 return json.dumps(properties, indent=2)
             return json.dumps({"error": "Table body not found in the properties table"})
 
-        for row in tbody.find_all('tr'):
-            cells = row.find_all('td')
+        for row in tbody.find_all("tr"):
+            cells = row.find_all("td")
 
             # Extract address information (safely)
-            address_cell = cells[0].find('a') if len(cells) > 0 else None
+            address_cell = cells[0].find("a") if len(cells) > 0 else None
             if not address_cell:
                 continue  # Skip this row if no address cell found
 
-            address_parts = [part.strip() for part in address_cell.get_text(separator='\n').strip().split('\n')]
-            address_parts = [part for part in address_parts if part]  # Remove empty strings
+            address_parts = [
+                part.strip()
+                for part in address_cell.get_text(separator="\n").strip().split("\n")
+            ]
+            address_parts = [
+                part for part in address_parts if part
+            ]  # Remove empty strings
 
             # Parse property info
             property_obj = AppFolioIntegration._parse_address_parts(address_parts)
 
             # Extract property type, units, vacancy
-            property_obj['type'] = cells[1].text.strip() if len(cells) > 1 else None
-            property_obj['units'] = cells[2].text.strip() if len(cells) > 2 else None
-            property_obj['vacant'] = cells[3].text.strip() == 'Yes' if len(cells) > 3 else False
+            property_obj["type"] = cells[1].text.strip() if len(cells) > 1 else None
+            property_obj["units"] = cells[2].text.strip() if len(cells) > 2 else None
+            property_obj["vacant"] = (
+                cells[3].text.strip() == "Yes" if len(cells) > 3 else False
+            )
 
             # Extract owner information (safely)
-            owner_cell = cells[4].find('span', class_='u-align-middle') if len(cells) > 4 else None
-            property_obj['owner'] = owner_cell.text.strip() if owner_cell else None
+            owner_cell = (
+                cells[4].find("span", class_="u-align-middle")
+                if len(cells) > 4
+                else None
+            )
+            property_obj["owner"] = owner_cell.text.strip() if owner_cell else None
 
             # Add property URL (safely)
             try:
-                property_link = cells[0].find('a')['href'] if cells[0].find('a') else None
+                property_link = (
+                    cells[0].find("a")["href"] if cells[0].find("a") else None
+                )
                 if property_link:
-                    property_obj['url'] = f"https://ocf.appfolio.com{property_link}"
+                    property_obj["url"] = f"https://ocf.appfolio.com{property_link}"
             except (KeyError, TypeError, IndexError):
-                property_obj['url'] = None
+                property_obj["url"] = None
 
             properties.append(property_obj)
 
@@ -1147,7 +1277,7 @@ class AppFolioIntegration(Integration):
         city_state_zip = None
 
         if len(address_parts) == 3:
-            if not address_parts[0].endswith(('Avenue', 'Street', 'Ave', 'St')):
+            if not address_parts[0].endswith(("Avenue", "Street", "Ave", "St")):
                 property_name = address_parts[0]
                 street_address = address_parts[1]
             else:
@@ -1160,9 +1290,9 @@ class AppFolioIntegration(Integration):
             street_address = address_parts[0]
 
         return {
-            'name': property_name,
-            'street_address': street_address,
-            'city_state_zip': city_state_zip
+            "name": property_name,
+            "street_address": street_address,
+            "city_state_zip": city_state_zip,
         }
 
     @staticmethod
@@ -1177,7 +1307,7 @@ class AppFolioIntegration(Integration):
             str: The service request ID if found, None otherwise
         """
         # Use regex to find the service_requests ID
-        match = re.search(r'/service_requests/(\d+)/', url)
+        match = re.search(r"/service_requests/(\d+)/", url)
 
         if match:
             return match.group(1)
