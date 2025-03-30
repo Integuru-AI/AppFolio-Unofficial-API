@@ -339,6 +339,283 @@ class AppFolioIntegration(Integration):
         # Print the resulting table dictionary without outputting the huge original JSON
         return table
 
+    async def _get_move_in_data(self):
+        url = f"{self.url}/dashboard/move_ins_data"
+        params = {
+            'sort[by]': 'future_tenant_date',
+            'sort[order]': 'asc',
+        }
+        headers = self.headers.copy()
+        headers['x-requested-with'] = 'XMLHttpRequest'
+        headers['accept'] = 'application/json, text/javascript, */*; q=0.01'
+
+        page = 1
+        tenants = []
+        most_recent = []
+        while True:
+            params["page"] = page
+            response = await self._make_request("GET", url, headers=headers, params=params)
+            data = json.loads(response)
+            t_data = self._parse_move_ins(data)
+            if len(t_data) == 0 or most_recent == t_data:
+                break
+
+            tenants.extend(t_data)
+            most_recent = t_data
+            page += 1
+
+        return tenants
+
+    @staticmethod
+    def _parse_move_ins(data):
+        """
+        Parse the HTML table data from the JSON string.
+
+        Args:
+            data (dict): JSON string containing HTML table data
+
+        Returns:
+            list: List of dictionaries with parsed tenant information
+        """
+        body_rows = data.get("body_row_data", [])
+        tenants = []
+
+        id_pattern = re.compile(r'web_flow_id=(\d+)')
+
+        for row in body_rows:
+            tenant_info = {}
+            row_data = row.get("data", [])
+
+            # Extract tenant name
+            if len(row_data) > 0 and row_data[0].get("value"):
+                name_html = row_data[0].get("value", "")
+                href_match = re.search(r'href="([^"]+)"', name_html)
+                if href_match:
+                    tenant_info["tenant_url"] = href_match.group(1)
+                    id_match = id_pattern.search(tenant_info["tenant_url"])
+                    if id_match:
+                        tenant_info["tenant_id"] = id_match.group(1)
+
+                tenant_info["tenant_name"] = re.sub(r'<[^>]+>', '', name_html)
+
+            # Extract property-unit
+            if len(row_data) > 1 and row_data[1].get("value"):
+                property_html = row_data[1].get("value", "")
+                href_match = re.search(r'href="([^"]+)"', property_html)
+                if href_match:
+                    tenant_info["property_url"] = href_match.group(1)
+
+                property_text = re.sub(r'<[^>]+>', '', property_html)
+                tenant_info["property_unit"] = property_text
+
+                # Extract property name and unit separately if possible
+                if " - " in property_text:
+                    parts = property_text.split(" - ", 1)
+                    tenant_info["property_name"] = parts[0].strip()
+                    tenant_info["unit"] = parts[1].strip()
+                else:
+                    tenant_info["property_name"] = property_text
+                    tenant_info["unit"] = ""
+            else:
+                tenant_info["property_unit"] = ""
+                tenant_info["property_name"] = ""
+                tenant_info["unit"] = ""
+
+            # Extract move-in date
+            if len(row_data) > 2 and row_data[2].get("value"):
+                date_html = row_data[2].get("value", "")
+                tenant_info["move_in_date"] = re.sub(r'<[^>]+>', '', date_html)
+
+            tenants.append(tenant_info)
+
+        return tenants
+
+    async def _get_move_out_data(self):
+        url = f"{self.url}/dashboard/move_outs_data"
+        params = {
+            'sort[by]': 'move_out_flow_date',
+            'sort[order]': 'asc',
+        }
+        headers = self.headers.copy()
+        headers['x-requested-with'] = 'XMLHttpRequest'
+        headers['accept'] = 'application/json, text/javascript, */*; q=0.01'
+
+        page = 1
+        tenants = []
+        most_recent = []
+        while True:
+            params["page"] = page
+            response = await self._make_request("GET", url, headers=headers, params=params)
+            data = json.loads(response)
+            outs = self._parse_move_outs(data)
+            if len(outs) == 0 or outs == most_recent:
+                break
+
+            tenants.extend(outs)
+            most_recent = outs
+            page += 1
+
+        return tenants
+
+    @staticmethod
+    def _merge_moves_data(movein_tenants, moveout_tenants):
+        """
+        Merge parsed move-in and move-out tenant data into a comprehensive list.
+
+        Args:
+            movein_tenants (list): List of dictionaries with parsed move-in tenant data
+            moveout_tenants (list): List of dictionaries with parsed move-out tenant data
+
+        Returns:
+            list: List of dictionaries with merged tenant information
+        """
+        # Create a merged list starting with all move-in tenants
+        merged_tenants = []
+
+        # Dictionary to store moveout tenants by name for easier lookup
+        moveout_by_name = {tenant["tenant_name"].lower(): tenant for tenant in moveout_tenants}
+
+        # First, process all move-in tenants
+        for movein in movein_tenants:
+            # Extract property name and unit separately if not already done
+            property_unit = movein.get("property_unit", "")
+            property_name = movein.get("property_name", "")
+            unit = movein.get("unit", "")
+
+            if not property_name and " - " in property_unit:
+                parts = property_unit.split(" - ", 1)
+                property_name = parts[0].strip()
+                unit = parts[1].strip()
+
+            tenant_data = {
+                "tenant_id": movein.get("tenant_id", ""),
+                "tenant_name": movein.get("tenant_name", ""),
+                "property_unit": property_unit,
+                "property_name": property_name,
+                "unit": unit,
+                "move_in_date": movein.get("move_in_date", ""),
+                "move_out_date": "",
+                "moveout_type": "",
+                "moveout_id": "",
+                "is_overdue": False
+            }
+
+            # Check if this tenant has a matching move-out record by name
+            moveout = moveout_by_name.get(movein["tenant_name"].lower())
+            if moveout:
+                tenant_data["move_out_date"] = moveout.get("move_out_date", "")
+                tenant_data["moveout_type"] = moveout.get("moveout_type", "")
+                tenant_data["moveout_id"] = moveout.get("moveout_id", "")
+                tenant_data["is_overdue"] = moveout.get("is_overdue", False)
+
+            merged_tenants.append(tenant_data)
+
+        # Now add any moveout tenants that don't have a matching move-in record
+        processed_names = {tenant["tenant_name"].lower() for tenant in merged_tenants}
+
+        for moveout in moveout_tenants:
+            if moveout["tenant_name"].lower() not in processed_names:
+                # Extract property name and unit separately if not already done
+                property_unit = moveout.get("property_unit", "")
+                property_name = moveout.get("property_name", "")
+                unit = moveout.get("unit", "")
+
+                if not property_name and " - " in property_unit:
+                    parts = property_unit.split(" - ", 1)
+                    property_name = parts[0].strip()
+                    unit = parts[1].strip()
+
+                tenant_data = {
+                    "tenant_id": "",  # No matching move-in ID
+                    "tenant_name": moveout.get("tenant_name", ""),
+                    "property_unit": property_unit,
+                    "property_name": property_name,
+                    "unit": unit,
+                    "move_in_date": "",  # No move-in date
+                    "move_out_date": moveout.get("move_out_date", ""),
+                    "moveout_type": moveout.get("moveout_type", ""),
+                    "moveout_id": moveout.get("moveout_id", ""),
+                    "is_overdue": moveout.get("is_overdue", False)
+                }
+                merged_tenants.append(tenant_data)
+
+        return merged_tenants
+
+    async def fetch_tenancy_move_data(self):
+        move_ins = await self._get_move_in_data()
+        move_outs = await self._get_move_out_data()
+
+        result = self._merge_moves_data(
+            movein_tenants=move_ins,
+            moveout_tenants=move_outs
+        )
+        return result
+
+    @staticmethod
+    def _parse_move_outs(data):
+        """
+        Parse the HTML move-out table data from the JSON string.
+
+        Args:
+            data (dict): JSON string containing HTML table data
+
+        Returns:
+            list: List of dictionaries with parsed tenant move-out information
+        """
+        body_rows = data.get("body_row_data", [])
+        moveouts = []
+        id_pattern = re.compile(r'/move_outs/(\d+)')
+
+        for row in body_rows:
+            moveout_info = {}
+            row_data = row.get("data", [])
+
+            # Extract tenant name
+            if len(row_data) > 0 and row_data[0].get("value"):
+                name_html = row_data[0].get("value", "")
+                href_match = re.search(r'href="([^"]+)"', name_html)
+                if href_match:
+                    moveout_info["tenant_url"] = href_match.group(1)
+                    id_match = id_pattern.search(moveout_info["tenant_url"])
+                    if id_match:
+                        moveout_info["moveout_id"] = id_match.group(1)
+
+                moveout_info["tenant_name"] = re.sub(r'<[^>]+>', '', name_html)
+
+            # Extract move out type
+            if len(row_data) > 1 and row_data[1].get("value"):
+                type_html = row_data[1].get("value", "")
+                moveout_info["moveout_type"] = re.sub(r'<[^>]+>', '', type_html)
+
+            # Extract property-unit
+            if len(row_data) > 2 and row_data[2].get("value"):
+                property_html = row_data[2].get("value", "")
+                href_match = re.search(r'href="([^"]+)"', property_html)
+                if href_match:
+                    moveout_info["property_url"] = href_match.group(1)
+
+                property_text = re.sub(r'<[^>]+>', '', property_html)
+                moveout_info["property_unit"] = property_text
+
+                # Extract property name and unit separately if possible
+                if " - " in property_text:
+                    parts = property_text.split(" - ", 1)
+                    moveout_info["property_name"] = parts[0].strip()
+                    moveout_info["unit"] = parts[1].strip()
+                else:
+                    moveout_info["property_name"] = property_text
+                    moveout_info["unit"] = ""
+
+            # Extract move-out date
+            if len(row_data) > 3 and row_data[3].get("value"):
+                date_html = row_data[3].get("value", "")
+                moveout_info["is_overdue"] = "text-danger" in date_html
+                moveout_info["move_out_date"] = re.sub(r'<[^>]+>', '', date_html)
+
+            moveouts.append(moveout_info)
+
+        return moveouts
+
     async def fetch_units(self, property_url: str):
         params = {"items_per_page": 1000}
         url = f"{property_url}/units"
@@ -736,7 +1013,6 @@ class AppFolioIntegration(Integration):
     async def _parse_vacancy_task(self, vacancy_item: Tag):
         try:
             headers = self.headers.copy()
-            # headers['Accept'] = 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
             headers["Accept"] = "*/*"
 
             parsed = self._parse_vacancy_card(card=vacancy_item)
