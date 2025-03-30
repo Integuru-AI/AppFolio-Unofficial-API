@@ -316,6 +316,10 @@ class AppFolioIntegration(Integration):
                 row_values.extend([""] * (len(headers) - len(row_values)))
             row_dict = dict(zip(headers, row_values))
 
+            # Rename "Unit" key to "Unit Name", if present
+            if "Unit" in row_dict:
+                row_dict["Unit Name"] = row_dict.pop("Unit")
+
             # Extract occupancy and selected tenant IDs from the "Name" cell (first column)
             name_cell_html = row_cells[0].get("value", "") if row_cells else ""
             name_soup = BeautifulSoup(name_cell_html, "html.parser")
@@ -336,7 +340,7 @@ class AppFolioIntegration(Integration):
             row_dict["Selected Tenant ID"] = selected_tenant_id
 
             table.append(row_dict)
-        # Print the resulting table dictionary without outputting the huge original JSON
+        # Return the resulting table
         return table
 
     async def _get_move_in_data(self):
@@ -380,7 +384,7 @@ class AppFolioIntegration(Integration):
         body_rows = data.get("body_row_data", [])
         tenants = []
 
-        id_pattern = re.compile(r'web_flow_id=(\d+)')
+        id_pattern = re.compile(r"web_flow_id=(\d+)")
 
         for row in body_rows:
             tenant_info = {}
@@ -396,7 +400,7 @@ class AppFolioIntegration(Integration):
                     if id_match:
                         tenant_info["tenant_id"] = id_match.group(1)
 
-                tenant_info["tenant_name"] = re.sub(r'<[^>]+>', '', name_html)
+                tenant_info["tenant_name"] = re.sub(r"<[^>]+>", "", name_html)
 
             # Extract property-unit
             if len(row_data) > 1 and row_data[1].get("value"):
@@ -405,7 +409,7 @@ class AppFolioIntegration(Integration):
                 if href_match:
                     tenant_info["property_url"] = href_match.group(1)
 
-                property_text = re.sub(r'<[^>]+>', '', property_html)
+                property_text = re.sub(r"<[^>]+>", "", property_html)
                 tenant_info["property_unit"] = property_text
 
                 # Extract property name and unit separately if possible
@@ -424,7 +428,7 @@ class AppFolioIntegration(Integration):
             # Extract move-in date
             if len(row_data) > 2 and row_data[2].get("value"):
                 date_html = row_data[2].get("value", "")
-                tenant_info["move_in_date"] = re.sub(r'<[^>]+>', '', date_html)
+                tenant_info["move_in_date"] = re.sub(r"<[^>]+>", "", date_html)
 
             tenants.append(tenant_info)
 
@@ -433,19 +437,21 @@ class AppFolioIntegration(Integration):
     async def _get_move_out_data(self):
         url = f"{self.url}/dashboard/move_outs_data"
         params = {
-            'sort[by]': 'move_out_flow_date',
-            'sort[order]': 'asc',
+            "sort[by]": "move_out_flow_date",
+            "sort[order]": "asc",
         }
         headers = self.headers.copy()
-        headers['x-requested-with'] = 'XMLHttpRequest'
-        headers['accept'] = 'application/json, text/javascript, */*; q=0.01'
+        headers["x-requested-with"] = "XMLHttpRequest"
+        headers["accept"] = "application/json, text/javascript, */*; q=0.01"
 
         page = 1
         tenants = []
         most_recent = []
         while True:
             params["page"] = page
-            response = await self._make_request("GET", url, headers=headers, params=params)
+            response = await self._make_request(
+                "GET", url, headers=headers, params=params
+            )
             data = json.loads(response)
             outs = self._parse_move_outs(data)
             if len(outs) == 0 or outs == most_recent:
@@ -473,7 +479,9 @@ class AppFolioIntegration(Integration):
         merged_tenants = []
 
         # Dictionary to store moveout tenants by name for easier lookup
-        moveout_by_name = {tenant["tenant_name"].lower(): tenant for tenant in moveout_tenants}
+        moveout_by_name = {
+            tenant["tenant_name"].lower(): tenant for tenant in moveout_tenants
+        }
 
         # First, process all move-in tenants
         for movein in movein_tenants:
@@ -497,7 +505,7 @@ class AppFolioIntegration(Integration):
                 "move_out_date": "",
                 "moveout_type": "",
                 "moveout_id": "",
-                "is_overdue": False
+                "is_overdue": False,
             }
 
             # Check if this tenant has a matching move-out record by name
@@ -535,7 +543,7 @@ class AppFolioIntegration(Integration):
                     "move_out_date": moveout.get("move_out_date", ""),
                     "moveout_type": moveout.get("moveout_type", ""),
                     "moveout_id": moveout.get("moveout_id", ""),
-                    "is_overdue": moveout.get("is_overdue", False)
+                    "is_overdue": moveout.get("is_overdue", False),
                 }
                 merged_tenants.append(tenant_data)
 
@@ -546,8 +554,7 @@ class AppFolioIntegration(Integration):
         move_outs = await self._get_move_out_data()
 
         result = self._merge_moves_data(
-            movein_tenants=move_ins,
-            moveout_tenants=move_outs
+            movein_tenants=move_ins, moveout_tenants=move_outs
         )
         return result
 
@@ -564,7 +571,7 @@ class AppFolioIntegration(Integration):
         """
         body_rows = data.get("body_row_data", [])
         moveouts = []
-        id_pattern = re.compile(r'/move_outs/(\d+)')
+        id_pattern = re.compile(r"/move_outs/(\d+)")
 
         for row in body_rows:
             moveout_info = {}
@@ -580,12 +587,12 @@ class AppFolioIntegration(Integration):
                     if id_match:
                         moveout_info["moveout_id"] = id_match.group(1)
 
-                moveout_info["tenant_name"] = re.sub(r'<[^>]+>', '', name_html)
+                moveout_info["tenant_name"] = re.sub(r"<[^>]+>", "", name_html)
 
             # Extract move out type
             if len(row_data) > 1 and row_data[1].get("value"):
                 type_html = row_data[1].get("value", "")
-                moveout_info["moveout_type"] = re.sub(r'<[^>]+>', '', type_html)
+                moveout_info["moveout_type"] = re.sub(r"<[^>]+>", "", type_html)
 
             # Extract property-unit
             if len(row_data) > 2 and row_data[2].get("value"):
@@ -594,7 +601,7 @@ class AppFolioIntegration(Integration):
                 if href_match:
                     moveout_info["property_url"] = href_match.group(1)
 
-                property_text = re.sub(r'<[^>]+>', '', property_html)
+                property_text = re.sub(r"<[^>]+>", "", property_html)
                 moveout_info["property_unit"] = property_text
 
                 # Extract property name and unit separately if possible
@@ -610,7 +617,7 @@ class AppFolioIntegration(Integration):
             if len(row_data) > 3 and row_data[3].get("value"):
                 date_html = row_data[3].get("value", "")
                 moveout_info["is_overdue"] = "text-danger" in date_html
-                moveout_info["move_out_date"] = re.sub(r'<[^>]+>', '', date_html)
+                moveout_info["move_out_date"] = re.sub(r"<[^>]+>", "", date_html)
 
             moveouts.append(moveout_info)
 
