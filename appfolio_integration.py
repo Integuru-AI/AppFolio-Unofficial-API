@@ -285,6 +285,42 @@ class AppFolioIntegration(Integration):
         # Process all data items
         return [process_data_item(item) for item in response_json["data"]]
 
+    async def fetch_emails(self, occupancy_id: str, tenant_id: str):
+        url = f"{self.url}/occupancies/{occupancy_id}/selected_tenant/{tenant_id}"
+        headers = self.headers.copy()
+
+        html_content = await self._make_request(
+            "GET",
+            url,
+            headers=headers,
+            max_line_size=8190 * 15,
+            max_field_size=8190 * 15,
+        )
+        if "Occupancy not found." in html_content:
+            raise IntegrationAPIError(
+                self.integration_name,
+                f"Occupancy not found. [Occupancy ID: {occupancy_id}, Tenant ID: {tenant_id}]",
+            )
+        # Robust email regex pattern (case-insensitive).
+        email_regex = re.compile(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b")
+
+        soup = BeautifulSoup(html_content, "html.parser")
+
+        # First, search for email addresses in "mailto:" links.
+        for a in soup.find_all("a", href=True):
+            href = a["href"]
+            if href.lower().startswith("mailto:"):
+                candidate = href[7:]  # Remove "mailto:" prefix.
+                if email_regex.fullmatch(candidate):
+                    return {"email": candidate}
+
+        # Fallback: search the text content for an email address.
+        text = soup.get_text()
+        match = email_regex.search(text)
+        if match:
+            return {"email": match.group(0)}
+        return {"email": None}
+
     async def fetch_all_tenants(self, page: int = 1):
         url = f"{self.url}/occupancies"
         params = {"page": page, "sort[by]": "name", "sort[order]": "asc"}
@@ -342,33 +378,6 @@ class AppFolioIntegration(Integration):
             table.append(row_dict)
         # Return the resulting table
         return table
-
-    async def _get_move_in_data(self):
-        url = f"{self.url}/dashboard/move_ins_data"
-        params = {
-            'sort[by]': 'future_tenant_date',
-            'sort[order]': 'asc',
-        }
-        headers = self.headers.copy()
-        headers['x-requested-with'] = 'XMLHttpRequest'
-        headers['accept'] = 'application/json, text/javascript, */*; q=0.01'
-
-        page = 1
-        tenants = []
-        most_recent = []
-        while True:
-            params["page"] = page
-            response = await self._make_request("GET", url, headers=headers, params=params)
-            data = json.loads(response)
-            t_data = self._parse_move_ins(data)
-            if len(t_data) == 0 or most_recent == t_data:
-                break
-
-            tenants.extend(t_data)
-            most_recent = t_data
-            page += 1
-
-        return tenants
 
     @staticmethod
     def _parse_move_ins(data):
