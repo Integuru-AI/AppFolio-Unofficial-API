@@ -315,20 +315,18 @@ class AppFolioIntegration(Integration):
 
         soup = BeautifulSoup(html_content, "html.parser")
 
-        # First, search for email addresses in "mailto:" links.
-        for a in soup.find_all("a", href=True):
-            href = a["href"]
+        # Search for email addresses in elements with class "js-email-mail-to".
+        email_element = soup.find("a", class_="js-email-mail-to")
+        if email_element and email_element.has_attr("href"):
+            href = email_element["href"]
             if href.lower().startswith("mailto:"):
                 candidate = href[7:]  # Remove "mailto:" prefix.
                 if email_regex.fullmatch(candidate):
                     return {"email": candidate}
 
         # Fallback: search the text content for an email address.
-        text = soup.get_text()
-        match = email_regex.search(text)
-        if match:
-            return {"email": match.group(0)}
-        return {"email": None}
+
+        return {"email": ""}
 
     async def fetch_all_tenants(self, page: int = 1):
         url = f"{self.url}/occupancies"
