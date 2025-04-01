@@ -1404,7 +1404,7 @@ class AppFolioIntegration(Integration):
         params = {
             "hoa_index_page": "false",
             "include_hidden_properties": "true",
-            "page": "1",
+            "page": page,
             "sort[by]": "name",
             "sort[order]": "asc",
         }
