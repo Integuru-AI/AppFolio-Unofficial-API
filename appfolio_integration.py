@@ -23,15 +23,18 @@ class AppFolioIntegration(Integration):
         super().__init__("appfolio")
         self.network_requester = None
         self.user_agent = user_agent
-        self.url = "https://mccaw.appfolio.com"
         self.headers = None
         self.token = None
+        self.domain = None
+        self.url = None
         self.cookie_string = None
 
-    async def initialize(self, network_requester=None, tokens: dict | str = None):
+    async def initialize(self, domain: str = None, network_requester=None, tokens: dict | str = None):
+        self.domain = domain
+        self.url = f"https://{self.domain}"
         self.network_requester = network_requester
         self.headers = {
-            "Host": self.url,
+            "Host": self.domain,
             "User-Agent": self.user_agent,
         }
 
@@ -68,7 +71,7 @@ class AppFolioIntegration(Integration):
             # First try with automatic redirects
             try:
                 async with session.request(
-                    method, url, allow_redirects=True, **kwargs
+                        method, url, allow_redirects=True, **kwargs
                 ) as response:
                     if response.status == 200:
                         return await self._handle_response(response)
@@ -91,7 +94,7 @@ class AppFolioIntegration(Integration):
                 )
 
     async def _handle_manual_redirect(
-        self, session, method: str, url: str, max_redirects: int, **kwargs
+            self, session, method: str, url: str, max_redirects: int, **kwargs
     ) -> str:
         """Handle redirects manually when automatic redirects fail"""
         redirect_count = 0
@@ -100,7 +103,7 @@ class AppFolioIntegration(Integration):
 
         while redirect_count < max_redirects:
             async with session.request(
-                current_method, current_url, allow_redirects=False, **kwargs
+                    current_method, current_url, allow_redirects=False, **kwargs
             ) as response:
                 if response.status in (301, 302, 303, 307, 308):
                     redirect_count += 1
@@ -138,7 +141,7 @@ class AppFolioIntegration(Integration):
         )
 
     async def _handle_response(
-        self, response: aiohttp.ClientResponse
+            self, response: aiohttp.ClientResponse
     ) -> Union[str, Any]:
         if response.status == 200 or response.ok:
             return await response.text()
@@ -153,7 +156,10 @@ class AppFolioIntegration(Integration):
                 )
             # potential auth caused
             reason = response.reason
-            raise IntegrationAuthError(f"AppFolio: {status_code} - {reason}")
+            raise IntegrationAuthError(
+                message=f"AppFolio: {status_code} - {reason}",
+                status_code=status_code,
+            )
         else:
             raise IntegrationAPIError(
                 self.integration_name,
@@ -373,9 +379,9 @@ class AppFolioIntegration(Integration):
                 parts = href.strip("/").split("/")
                 # Expected URL pattern: /occupancies/<occupancy_id>/selected_tenant/<tenant_id>
                 if (
-                    len(parts) >= 4
-                    and parts[0] == "occupancies"
-                    and parts[2] == "selected_tenant"
+                        len(parts) >= 4
+                        and parts[0] == "occupancies"
+                        and parts[2] == "selected_tenant"
                 ):
                     occupancy_id = parts[1]
                     selected_tenant_id = parts[3]
@@ -973,7 +979,7 @@ class AppFolioIntegration(Integration):
             return None
 
         # Extract the content between quotes
-        content = response[content_start + 1 : content_end]
+        content = response[content_start + 1: content_end]
         # Replace escaped characters
         content = content.replace('\\"', '"')  # Unescape quotes
         content = content.replace("\\n", "\n")  # Handle newlines
@@ -1079,7 +1085,7 @@ class AppFolioIntegration(Integration):
                     max_field_size=8190 * 15,
                 )
                 d_start = campaign_resp.find("campaign_unit_type_link")
-                c_data = campaign_resp[d_start : d_start + 150]
+                c_data = campaign_resp[d_start: d_start + 150]
                 pattern = r'href=[\'"]([^\'"]*)[\'"]'
                 match = re.search(pattern, c_data)
 
