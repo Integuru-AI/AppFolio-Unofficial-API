@@ -2,6 +2,8 @@ import asyncio
 import codecs
 import re
 import json
+import uuid
+
 import aiohttp
 import datetime
 import urllib.parse
@@ -1507,6 +1509,288 @@ class AppFolioIntegration(Integration):
             }
             properties.append(property_dict)
         return properties
+
+    async def _verify_occupancy_exists(self, occupancy_id: int):
+        headers = self.headers.copy()
+        headers["Accept-Version"] = "v2"
+        headers["Accept"] = "application/vnd.api+json"
+        headers["X-Requested-With"] = "XMLHttpRequest"
+
+        path = self.url + f"/api/occupancies/{occupancy_id}?fields[occupancies]=move_in,status,hidden"
+        response = await self._make_request("GET", url=path, headers=headers)
+        occupancy_data = json.loads(response)
+        if "errors" in occupancy_data:
+            errors = occupancy_data["errors"]
+            error_msg = ", ".join(error['title'] for error in errors)
+
+            raise IntegrationAPIError(
+                status_code=404,
+                message=f"[{occupancy_id}]: {error_msg}",
+                integration_name=self.integration_name
+            )
+
+        return True
+
+    async def occupancy_add_attachment(self, occupancy_id: int, file_name: str, file_content: bytes, f_type: str):
+        await self._verify_occupancy_exists(occupancy_id)
+
+        headers = self.headers.copy()
+        headers["Accept-Version"] = "v2"
+        headers["Accept"] = "application/vnd.api+json"
+        headers["X-Requested-With"] = "XMLHttpRequest"
+        headers["Content-Type"] = "application/vnd.api+json"
+
+        url = self.url + f"/api/occupancies/{occupancy_id}/attachments"
+        params = {
+            "include": "user"
+        }
+        query = {
+            "data": [
+                {
+                    "type": "attachments",
+                    "attributes": {
+                        "content_type": f_type,
+                        "name": file_name,
+                        "size": len(file_content)
+                    },
+                    "relationships": {
+                        "folder": {
+                            "data": {}
+                        }
+                    }
+                }
+            ]
+        }
+        q_data = json.dumps(query).replace(" ", "")
+
+        create_response = await self._make_request("POST", url=url, params=params, headers=headers, data=q_data)
+        create_response = json.loads(create_response)
+        upload_data = create_response.get("data")
+
+        try:
+            upload_data = upload_data[0]
+        except IndexError:
+            raise IntegrationAPIError(
+                integration_name=self.integration_name,
+                message="Failed to initiate content upload"
+            )
+
+        upload_id = upload_data.get("id")
+        upload_params = upload_data.get("attributes", {}).get("upload_params")
+
+        if not upload_params:
+            raise IntegrationAPIError(
+                integration_name=self.integration_name,
+                message="No upload parameters received from API"
+            )
+
+        # Upload the file content to S3
+        uploaded = await self._upload_attachment(upload_params, file_content)
+
+        confirm_path = self.url + f"/api/occupancies/attachments/{upload_id}/confirm"
+        headers["Referer"] = self.url + f"/occupancies/{occupancy_id}"
+        confirm_response = await self._make_request("PUT", url=confirm_path, headers=headers, data="{}")
+
+        # Return the download URL and other relevant information
+        return {
+            "id": upload_id,
+            "download_url": upload_data.get("attributes", {}).get("download_url"),
+            "preview_url": upload_data.get("attributes", {}).get("preview_url"),
+            "name": upload_data.get("attributes", {}).get("name")
+        }
+
+    async def _upload_attachment(self, upload_params: dict, content: bytes):
+        try:
+            # Extract S3 upload URL and form fields from the parameters
+            url = upload_params.get("url")
+            fields = upload_params.get("fields", {})
+
+            # Create boundary for multipart form data
+            boundary = f"----WebKitFormBoundary{uuid.uuid4().hex[:16]}"
+
+            # Build the multipart form data
+            form_data = []
+
+            # Add all form fields from the upload_params
+            for key, value in fields.items():
+                form_data.append(f'--{boundary}\r\n')
+                form_data.append(f'Content-Disposition: form-data; name="{key}"\r\n\r\n')
+                form_data.append(f'{value}\r\n')
+
+            # Add the file content
+            form_data.append(f'--{boundary}\r\n')
+            form_data.append(
+                f'Content-Disposition: form-data; name="file"; filename="{fields.get("key").split("/")[-1]}"\r\n')
+            form_data.append(f'Content-Type: {fields.get("Content-Type")}\r\n\r\n')
+
+            # Convert form_data to bytes and combine with file content
+            form_bytes = ''.join(form_data).encode('utf-8')
+            final_boundary = f'\r\n--{boundary}--\r\n'.encode('utf-8')
+            body = b''.join([
+                form_bytes,
+                content,
+                final_boundary
+            ])
+
+            # Setup headers for the S3 request
+            headers = {
+                'Content-Type': f'multipart/form-data; boundary={boundary}',
+                'User-Agent': self.user_agent,
+                'Accept': '*/*',
+                'Origin': self.url.split("/api")[0] if "/api" in self.url else self.url
+            }
+
+            # Make the request to S3
+            # response = await self._make_request("POST", url=url, headers=headers, data=body)
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, headers=headers, data=body) as response:
+                    if response.status >= 400:
+                        error_text = await response.text()
+                        raise IntegrationAPIError(
+                            status_code=response.status,
+                            message=f"Error uploading file to S3: {error_text}",
+                            integration_name=self.integration_name
+                        )
+
+                    # S3 returns empty 204 response on success
+                    return True
+
+        except Exception as e:
+            if isinstance(e, IntegrationAPIError):
+                raise e
+
+            raise IntegrationAPIError(
+                status_code=500,
+                message=f"Error uploading attachment: {str(e)}",
+                integration_name=self.integration_name
+            )
+
+    async def occupancy_add_note(self, occupancy_id: int, note: str = ""):
+        await self._verify_occupancy_exists(occupancy_id)
+
+        tenants = await self._fetch_occupancy_tenants(occupancy_id=occupancy_id)
+        if not tenants or len(tenants) == 0:
+            raise IntegrationAPIError(
+                integration_name=self.integration_name,
+                message=f"No tenants found for occupancy [{occupancy_id}]",
+                status_code=400
+            )
+
+        latest_tenant = tenants[0]
+        payload = await self._fetch_new_note_params(latest_tenant.get('id'))
+        payload['note[body]'] = note
+
+        # param_strings = []
+        # for key, value in payload.items():
+        #     if key == 'note[body]':
+        #         # URL encode the note body parameter
+        #         param_strings.append(f"note%5Bbody%5D={value}")
+        #     else:
+        #         # Regular parameter
+        #         param_strings.append(f"{key}={value}")
+        #
+        # request_data = '&'.join(param_strings)
+        create_path = self.url + f"/notes"
+
+        headers = self.headers.copy()
+        headers["X-Requested-With"] = "XMLHttpRequest"
+        headers["Content-Type"] = "application/x-www-form-urlencoded; charset=UTF-8"
+
+        response = await self._make_request("POST", url=create_path, headers=headers, data=payload)
+        created = self._verify_note_creation(response=response, note=note)
+        if created:
+            return {
+                "success": created
+            }
+
+        raise IntegrationAPIError(
+            integration_name=self.integration_name,
+            message=f"Failed to create note for occupancy [{occupancy_id}]",
+            status_code=400
+        )
+
+    @staticmethod
+    def _verify_note_creation(response: str, note: str):
+        # extremely basic but the regex is unstable
+        c_note = note.replace(" ", "").lower()
+        c_response = response.replace(" ", "").lower()
+
+        if c_response.find(c_note) != -1:
+            return True
+
+        # Direct search - simplest and most reliable
+        if f'<span>{note}</span>' in response:
+            return True
+
+        # Find all span contents and check each one
+        spans = re.findall(r'<span>([^<]*)<\/span>', response)
+        for span_text in spans:
+            unescaped_text = span_text.replace('\\n', '\n').replace('\\"', '"')
+            if unescaped_text == note:
+                return True
+
+        # Last resort - targeted search
+        js_note_text = re.search(r'js-note-text[^>]*>.*?<span>([^<]*)<\/span>', response, re.DOTALL)
+        if js_note_text and js_note_text.group(1) == note:
+            return True
+
+        return False
+
+    async def _fetch_new_note_params(self, tenant_id: int):
+        headers = self.headers.copy()
+        headers["X-Requested-With"] = "XMLHttpRequest"
+
+        path = self.url + f"/notes/new?parent_id={tenant_id}&parent_type=Tenant"
+        response = await self._make_request("GET", url=path, headers=headers)
+
+        html_pattern = r'BlockEdit\.displayEdit\(\s*"note_new",\s*"(.*?)"\s*\)'
+        html_match = re.search(html_pattern, response, re.DOTALL)
+
+        if not html_match:
+            return {
+                'error': 'Could not extract HTML from BlockEdit.displayEdit call'
+            }
+
+        # The HTML will have escaped quotes and newlines
+        html_content = html_match.group(1)
+
+        # Unescape the HTML content
+        html_content = html_content.replace('\\n', '\n').replace('\\"', '"')
+
+        # Extract authenticity_token
+        auth_token_match = re.search(r'name="authenticity_token" value="([^"]+)"', html_content)
+        authenticity_token = auth_token_match.group(1) if auth_token_match else None
+
+        # Extract parent_id
+        parent_id_match = re.search(r'name="parent_id"\s+value="([^"]+)"', html_content)
+        parent_id = parent_id_match.group(1) if parent_id_match else None
+
+        # Extract parent_type
+        parent_type_match = re.search(r'name="parent_type"\s+value="([^"]+)"', html_content)
+        parent_type = parent_type_match.group(1) if parent_type_match else None
+
+        # Build the request payload dictionary
+        payload = {
+            'authenticity_token': authenticity_token,
+            'parent_id': parent_id,
+            'parent_type': parent_type,
+            'note[body]': '',  # This will be filled by the user later
+            'commit': 'Save'  # The value of the submit button
+        }
+
+        return payload
+
+    async def _fetch_occupancy_tenants(self, occupancy_id: int):
+        headers = self.headers.copy()
+        headers["Accept-Version"] = "v2"
+        headers["Accept"] = "application/vnd.api+json"
+        headers["X-Requested-With"] = "XMLHttpRequest"
+
+        path = self.url + f"/api/tenants?filter[occupancy][id]={occupancy_id}&fields[tenants]=name,hidden"
+        response = await self._make_request("GET", url=path, headers=headers)
+        response = json.loads(response)
+        occupancy_tenants = response.get("data")
+        return occupancy_tenants
 
     @staticmethod
     def _parse_address_parts(address_parts):
