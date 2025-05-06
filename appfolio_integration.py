@@ -151,6 +151,15 @@ class AppFolioIntegration(Integration):
         status_code = response.status
         # do things with fail status codes
         if 400 <= status_code < 500:
+            if status_code == 403 and self.network_requester:
+                await self.network_requester.proxy_handler.set_new_proxy()
+                return IntegrationAPIError(
+                    integration_name=self.integration_name,
+                    status_code=403,
+                    message="Retry request",
+                    error_code="retry_request",
+                )
+
             if self.token is None:
                 raise IntegrationAuthError(
                     message="No access token. [Credentials might not exist/be valid]",
