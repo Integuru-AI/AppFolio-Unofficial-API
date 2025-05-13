@@ -749,10 +749,10 @@ class AppFolioIntegration(Integration):
         # Return the final list of dictionaries
         return rows
 
-    async def fetch_work_orders(self, status: str, start_date: str):
-        print(f"fetching work orders for {status} and {start_date}")
+    async def fetch_work_orders(self, status: str, start_date: str, page_number: int | None = None):
+        print(f"fetching work orders for status: {status}, start_date: {start_date}" + (f", page: {page_number}" if page_number is not None else ", all pages"))
         params = {
-            "page[size]": "100",
+            "page[size]": "10",
             # "page[number]": "1",
             "filter[created_at__gteq]": self._format_date(start_date),
             "sort": "-created_at",
@@ -785,29 +785,47 @@ class AppFolioIntegration(Integration):
 
         url = f"{self.url}/api/work_orders"
         raw_wo_list = []
-        page_index = 1
-        # Temporary edit: only loop once instead of until no more results
-        while True:  # This will run until we break out of the loop when no more results
-            print(f"fetching work orders for {status} and {start_date} on page {page_index}")
-            params.update({"page[number]": f"{page_index}"})
-            response = await self._make_request(
+
+        if page_number is not None:
+            # Fetch a specific page
+            print(f"Requesting page {page_number} for work orders...")
+            params.update({"page[number]": str(page_number)})
+            response_text = await self._make_request(
                 "GET", url, headers=headers, params=params
             )
             try:
-                response = json.loads(response)
+                response_data = json.loads(response_text)
             except json.decoder.JSONDecodeError:
-                print(f"not json response: {response}")
+                print(f"Failed to parse JSON response for page {page_number}: {response_text[:200]}...")
+                response_data = {"data": [], "included": []}
 
-            denorm_response = self.denormalize_response(response)
+            denorm_response = self.denormalize_response(response_data)
             if len(denorm_response) > 0:
                 raw_wo_list.extend(denorm_response)
-            else:
-                break
+        else:
+            # Fetch all pages
+            current_page_index = 1
+            while True:
+                print(f"Requesting page {current_page_index} for work orders (fetching all)...")
+                params.update({"page[number]": str(current_page_index)})
+                response_text = await self._make_request(
+                    "GET", url, headers=headers, params=params
+                )
+                try:
+                    response_data = json.loads(response_text)
+                except json.decoder.JSONDecodeError:
+                    print(f"Failed to parse JSON response for page {current_page_index}: {response_text[:200]}...")
+                    break
 
-            page_index += 1
+                denorm_response = self.denormalize_response(response_data)
+                if len(denorm_response) > 0:
+                    raw_wo_list.extend(denorm_response)
+                else:
+                    break
 
-            # No need to increment page_index since we're only running once
-        print(f"fetched {len(raw_wo_list)} work orders for {status} and {start_date}")
+                current_page_index += 1
+        
+        print(f"Fetched {len(raw_wo_list)} raw work order entries" + (f" from page {page_number}" if page_number is not None else " from all pages"))
         work_orders = []
         for i, order in enumerate(raw_wo_list):
             parsed_order = await self._parse_work_order_page(url=order.get("page"))
