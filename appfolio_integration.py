@@ -3,6 +3,7 @@ import codecs
 import re
 import json
 import uuid
+import logging
 
 import aiohttp
 import datetime
@@ -749,6 +750,7 @@ class AppFolioIntegration(Integration):
         return rows
 
     async def fetch_work_orders(self, status: str, start_date: str):
+        print(f"fetching work orders for {status} and {start_date}")
         params = {
             "page[size]": "100",
             # "page[number]": "1",
@@ -784,7 +786,9 @@ class AppFolioIntegration(Integration):
         url = f"{self.url}/api/work_orders"
         raw_wo_list = []
         page_index = 1
-        while True:
+        # Temporary edit: only loop once instead of until no more results
+        while True:  # This will run until we break out of the loop when no more results
+            print(f"fetching work orders for {status} and {start_date} on page {page_index}")
             params.update({"page[number]": f"{page_index}"})
             response = await self._make_request(
                 "GET", url, headers=headers, params=params
@@ -802,9 +806,12 @@ class AppFolioIntegration(Integration):
 
             page_index += 1
 
+            # No need to increment page_index since we're only running once
+        print(f"fetched {len(raw_wo_list)} work orders for {status} and {start_date}")
         work_orders = []
-        for order in raw_wo_list:
+        for i, order in enumerate(raw_wo_list):
             parsed_order = await self._parse_work_order_page(url=order.get("page"))
+            print(f"parsed work order {order.get('page')}")
             if order.get("vendor_company"):
                 order.pop("vendor_company")
             if order.get("remarks"):
@@ -814,7 +821,7 @@ class AppFolioIntegration(Integration):
 
             order.update(parsed_order)
             work_orders.append(order)
-
+        print(f"fetched {len(work_orders)} work orders for {status} and {start_date}")
         return work_orders
 
     async def _parse_work_order_page(self, url: str):
@@ -854,7 +861,9 @@ class AppFolioIntegration(Integration):
 
         owner_card_element = soup.select_one("div.js-owner-contact-card")
         if owner_card_element:
-            owner_data = {}
+            # Initialize with all expected keys
+            owner_data = {"name": None, "phones": [], "email": None, "notes": None}
+            
             owner_name_span = owner_card_element.select_one("span.contact-card__name")
             if owner_name_span:
                 owner_data["name"] = owner_name_span.text.strip()
@@ -862,14 +871,77 @@ class AppFolioIntegration(Integration):
             owner_contact_element = owner_card_element.select_one(
                 "div.js-contact-card-details"
             )
-            owner_contact_text = self._extract_text_from_div(owner_contact_element)
-            owner_data["data"] = owner_contact_text
+            
+            # Ensure owner_contact_element exists before trying to extract text or parse it
+            if owner_contact_element: 
+                contact_text = self._extract_text_from_div(owner_contact_element)
+                
+                # Attempt to extract email from mailto links first
+                email_link = owner_contact_element.select_one('a[href^="mailto:"]')
+                if email_link:
+                    owner_data["email"] = email_link.text.strip()
+                elif contact_text: # Fallback to regex if not in mailto link and contact_text exists
+                    email_regex = re.compile(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b")
+                    email_match = email_regex.search(contact_text)
+                    if email_match:
+                        owner_data["email"] = email_match.group(0)
+
+                # Attempt to extract phone numbers from tel links first
+                tel_links = owner_contact_element.select('a[href^="tel:"]')
+                for link in tel_links:
+                    phone = link.text.strip()
+                    if phone and phone not in owner_data["phones"]: # Check if phone already added
+                        owner_data["phones"].append(phone)
+                
+                # Fallback for phones from plain text if contact_text exists
+                if contact_text:
+                    phone_prefixes = ["phone:", "mobile:", "work phone:", "home phone:", "tel:"]
+                    contact_lines = contact_text.split('\\n')
+                    temp_phones_from_text = []
+                    idx = 0
+                    while idx < len(contact_lines):
+                        current_line_stripped = contact_lines[idx].strip()
+                        for prefix in phone_prefixes:
+                            if current_line_stripped.lower().startswith(prefix.lower()):
+                                num_part = current_line_stripped[len(prefix):].strip()
+                                if num_part:
+                                    temp_phones_from_text.append(num_part)
+                                elif (idx + 1 < len(contact_lines)):
+                                    next_line_stripped = contact_lines[idx+1].strip()
+                                    all_known_labels = phone_prefixes + ["email:", "e-mail:", "owner notes:"]
+                                    is_next_line_a_label = any(next_line_stripped.lower().startswith(lbl.lower()) for lbl in all_known_labels)
+                                    if next_line_stripped and not is_next_line_a_label:
+                                        temp_phones_from_text.append(next_line_stripped)
+                                        idx += 1 # Consume next line
+                                break # Found a phone prefix
+                        idx += 1
+                    
+                    for phone_str in temp_phones_from_text:
+                        # Basic validation: check for minimum digits and reject if email/notes marker present
+                        # Keep only digits and '+' for count check
+                        digits_only = ''.join(filter(lambda char: char.isdigit() or char == '+', phone_str))
+                        if len(digits_only) >= 7 and '@' not in phone_str and 'notes:' not in phone_str.lower() and phone_str not in owner_data["phones"]:
+                            # Further cleanup: remove potential labels mixed in the string if needed, though regex might be better
+                            # For now, just check length and common invalid patterns
+                            owner_data["phones"].append(phone_str.strip())
+
+                    # Extract Owner Notes specifically
+                    notes_title_div = owner_contact_element.find("div", class_="service-request-card-extra-title", string="Owner Notes:")
+                    if notes_title_div:
+                        notes_container_div = notes_title_div.find_next_sibling("div", class_="js-maintenance-notes")
+                        if notes_container_div:
+                            note_p = notes_container_div.find('p')
+                            note_text = (note_p.text.strip() if note_p else notes_container_div.text.strip())
+                            if note_text and note_text.lower() != 'none':
+                                owner_data["notes"] = note_text
+            # else: owner_contact_element is None, owner_data will retain initial None/empty list values
 
             work_order_data["owner"] = owner_data
 
         resident_card_element = soup.select_one("div.js-tenant-contact-card")
         if resident_card_element:
-            resident_data = {}
+            # Initialize resident_data with expected keys
+            resident_data = {"name": None, "email": None, "phones": [], "notes": None, "data": None} 
             resident_name_span = resident_card_element.select_one(
                 "span.contact-card__name"
             )
@@ -879,30 +951,80 @@ class AppFolioIntegration(Integration):
             extra_div_element = resident_card_element.select_one(
                 "div.js-contact-card-details"
             )
-            extra_text = self._extract_text_from_div(extra_div_element)
-            resident_data["data"] = extra_text.strip()
+            
+            if extra_div_element:
+                extra_text = self._extract_text_from_div(extra_div_element)
+                # Store the raw data block which might contain other info like pets etc.
+                resident_data["data"] = extra_text 
+
+                # Attempt to extract email from mailto links first
+                email_link = extra_div_element.select_one('a[href^="mailto:"]')
+                if email_link:
+                    resident_data["email"] = email_link.text.strip()
+                elif extra_text: # Fallback to regex if not in mailto link and extra_text exists
+                    email_regex = re.compile(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b")
+                    email_match = email_regex.search(extra_text)
+                    if email_match:
+                        resident_data["email"] = email_match.group(0)
+                
+                # Attempt to extract phone numbers from tel links
+                tel_links = extra_div_element.select('a[href^="tel:"]')
+                for link in tel_links:
+                    phone = link.text.strip()
+                    if phone and phone not in resident_data["phones"]:
+                         resident_data["phones"].append(phone)
+                
+                # TODO: Add fallback logic for phones from extra_text if needed (similar to owner parsing)
+                
+                # TODO: Extract Resident Notes if a specific structure exists for them
 
             work_order_data["resident"] = resident_data
 
-        # get vendor info
-        vendor_element = soup.select_one("div.js-vendor-contact-card")
-        if vendor_element:
-            vendor_name_element = vendor_element.select_one("span.contact-card__name")
-            vendor_name = vendor_name_element.text.strip()
+            # Extract Vendor Info
+            vendor_card = soup.select_one(".js-vendor-contact-card")
+            vendor_data = {"name": None, "phones": [], "fax": [], "email": None, "address": None}
+            if vendor_card:
+                name_elem = vendor_card.select_one("span.contact-card__name")
+                if name_elem:
+                    vendor_data["name"] = name_elem.text.strip()
 
-            vendor_contact_element = vendor_element.select_one(
-                "div.js-contact-card-details"
-            )
-            vendor_contact = None
-            if vendor_contact_element:
-                contact_spans = vendor_contact_element.select("span")
-                vendor_contact = "\n".join(span.text.strip() for span in contact_spans)
+                details_div = vendor_card.select_one("div.js-contact-card-details")
+                if details_div:
+                    # Extract Phones and Fax using links and context
+                    contact_info_spans = details_div.select("span.js-contact-card-contact-info")
+                    for span in contact_info_spans:
+                        tel_link = span.select_one('a[href^="tel:"]')
+                        if tel_link:
+                            number = tel_link.text.strip()
+                            # Check text content *before* the link within the span for context
+                            span_text_content = span.decode_contents() # Get HTML content to check text before link
+                            link_html = str(tel_link)
+                            text_before_link = span_text_content.split(link_html)[0].lower()
 
-            vendor = {
-                "name": vendor_name,
-                "contact": vendor_contact,
-            }
-            work_order_data["vendor"] = vendor
+                            if "fax:" in text_before_link:
+                                if number and number not in vendor_data["fax"]:
+                                    vendor_data["fax"].append(number)
+                            elif "phone:" in text_before_link: # Assume phone if not fax and prefix exists
+                                if number and number not in vendor_data["phones"]:
+                                     vendor_data["phones"].append(number)
+                            else:
+                                # If no clear prefix, maybe add to phone as default? Or skip?
+                                # Let's be conservative and only add if prefix is clear for now.
+                                logging.debug(f"Skipping number {number} in vendor card due to unclear prefix: {span.text}")
+
+
+                    # Extract Email
+                    email_link = details_div.select_one('a[href^="mailto:"]')
+                    if email_link:
+                        vendor_data["email"] = email_link.text.strip()
+
+                    # Extract Address
+                    address_elem = details_div.select_one("span.js-contact-card-address")
+                    if address_elem:
+                         # Use get_text with separator to handle <br> tags
+                         vendor_data["address"] = address_elem.get_text(separator="\\n", strip=True)
+
+            work_order_data["vendor"] = vendor_data
 
         # get priority information
         priority_element = soup.find("span", text="Priority:")
