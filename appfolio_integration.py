@@ -861,6 +861,11 @@ class AppFolioIntegration(Integration):
         work_order_data = {}
         service_id = self._extract_service_request_id(url)
 
+        # get created by
+        created_by_element = soup.select_one("span.js-service-request-header-created-by")
+        if created_by_element:
+            work_order_data["created_by"] = created_by_element.text.strip()
+
         # get job description
         description_element = soup.select_one("div.js-work-order-description")
         if description_element:
