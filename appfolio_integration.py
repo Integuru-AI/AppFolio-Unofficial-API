@@ -658,7 +658,7 @@ class AppFolioIntegration(Integration):
         return moveouts
 
     async def fetch_units(self, property_url: str):
-        params = {"items_per_page": 1000}
+        params = {"items_per_page": 100}
         url = f"{property_url}/units"
 
         headers = {
