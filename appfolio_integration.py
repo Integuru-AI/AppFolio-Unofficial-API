@@ -2019,3 +2019,105 @@ class AppFolioIntegration(Integration):
                 if text:  # Skip empty strings
                     all_text.append(text)
         return "\n".join(all_text)
+
+    async def add_work_order_note(self, work_order_id: str, service_request_id: str, note: str = ""):
+        """
+        Adds a note to a work order.
+        
+        Args:
+            work_order_id: The ID of the work order
+            service_request_id: The ID of the service request
+            note: The note text to add
+        """
+        print(f"Adding note to work order [{work_order_id}] for service request [{service_request_id}]")
+        # First get the work order page to get the CSRF token
+        work_order_url = f"{self.url}/maintenance/service_requests/{service_request_id}/work_orders/{work_order_id}"
+        headers = self.headers.copy()
+        headers["Accept"] = "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8"
+        
+        # Add the max_line_size and max_field_size parameters to handle large headers
+        response = await self._make_request(
+            "GET", 
+            work_order_url, 
+            headers=headers,
+            max_line_size=8190 * 15,
+            max_field_size=8190 * 15
+        )
+        soup = self._create_soup(response)
+        
+        # Extract CSRF token
+        csrf_meta_tag = soup.find('meta', {'name': 'csrf-token'})
+        if not csrf_meta_tag or not csrf_meta_tag.get('content'):
+            raise IntegrationAPIError(
+                integration_name=self.integration_name,
+                message="Could not find CSRF token on work order page",
+                status_code=400
+            )
+        
+        csrf_token = csrf_meta_tag.get('content')
+        
+        # Get the new note form
+        new_note_url = f"{self.url}/notes/new?parent_id={work_order_id}&parent_type=Maintenance%3A%3AWorkOrderDecorator"
+        headers = self.headers.copy()
+        headers.update({
+            "X-CSRF-Token": csrf_token,
+            "X-Requested-With": "XMLHttpRequest",
+            "Accept": "text/javascript, application/javascript, application/ecmascript, application/x-ecmascript"
+        })
+        
+        response = await self._make_request("GET", new_note_url, headers=headers)
+        
+        # Extract form token from JavaScript response
+        html_pattern = r'BlockEdit\.displayEdit\(\s*".*?",\s*"(.*)"\s*\);'
+        html_match = re.search(html_pattern, response, re.DOTALL)
+        
+        if not html_match:
+            raise IntegrationAPIError(
+                integration_name=self.integration_name,
+                message="Could not extract HTML from BlockEdit.displayEdit call",
+                status_code=400
+            )
+        
+        # Unescape the HTML content
+        html_content = html_match.group(1).replace('\\"', '"').replace('\\n', '\n')
+        
+        # Extract authenticity_token
+        auth_token_match = re.search(r'name="authenticity_token" value="([^"]+)"', html_content)
+        if not auth_token_match:
+            raise IntegrationAPIError(
+                integration_name=self.integration_name,
+                message="Could not find authenticity token in form",
+                status_code=400
+            )
+        
+        authenticity_token = auth_token_match.group(1)
+        
+        # Prepare the note submission
+        note_url = f"{self.url}/notes"
+        headers = self.headers.copy()
+        headers.update({
+            "X-CSRF-Token": csrf_token,
+            "X-Requested-With": "XMLHttpRequest",
+            "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+            "Accept": "*/*;q=0.5, text/javascript, application/javascript, application/ecmascript, application/x-ecmascript"
+        })
+        
+        data = {
+            'authenticity_token': authenticity_token,
+            'parent_id': work_order_id,
+            'parent_type': 'Maintenance::WorkOrderDecorator',
+            'note[body]': note,
+            'commit': 'Save'
+        }
+        
+        response = await self._make_request("POST", note_url, headers=headers, data=data)
+        
+        # Verify note was created
+        if self._verify_note_creation(response=response, note=note):
+            return {"success": True}
+        
+        raise IntegrationAPIError(
+            integration_name=self.integration_name,
+            message=f"Failed to create note for work order [{work_order_id}]",
+            status_code=400
+        )
