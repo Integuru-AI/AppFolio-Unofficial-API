@@ -1590,8 +1590,8 @@ class AppFolioIntegration(Integration):
         properties = []
         for row in json_data.get("body_row_data", []):
             cells = row.get("data", [])
-            if len(cells) < 5:
-                continue  # skip rows that do not have all the expected columns
+            # if len(cells) < 5:
+            #     continue  # skip rows that do not have all the expected columns
 
             # --- Column 1: Name (which includes the URL and address details) ---
             # Example HTML: <a href="...">Line1<br />Line2<br />Line3</a>
@@ -1646,9 +1646,11 @@ class AppFolioIntegration(Integration):
             vacant = True if vacant_text.lower() == "yes" else False
 
             # --- Column 5: Owners ---
-            owner_html = cells[4]["value"]
-            owner_soup = BeautifulSoup(owner_html, "html.parser")
-            owner = owner_soup.get_text(strip=True)
+            owner = "n/a"
+            if len(cells) > 4:
+                owner_html = cells[4]["value"]
+                owner_soup = BeautifulSoup(owner_html, "html.parser")
+                owner = owner_soup.get_text(strip=True)
 
             # Build the property dictionary
             property_dict = {
